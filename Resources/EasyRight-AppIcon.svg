@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="150" y1="92" x2="870" y2="932" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#635BFF"/>
+      <stop offset="0.48" stop-color="#3478F6"/>
+      <stop offset="1" stop-color="#19C6B3"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="238" y1="132" x2="704" y2="858" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.22"/>
+      <stop offset="0.58" stop-color="#FFFFFF" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="outerShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="24" stdDeviation="28" flood-color="#15225E" flood-opacity="0.28"/>
+    </filter>
+    <filter id="symbolShadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#143783" flood-opacity="0.30"/>
+    </filter>
+  </defs>
+
+  <!-- macOS app-icon tile -->
+  <rect x="64" y="52" width="896" height="896" rx="212" fill="url(#bg)" filter="url(#outerShadow)"/>
+  <rect x="82" y="70" width="860" height="860" rx="196" fill="none" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="8"/>
+  <path d="M214 115H730C497 174 314 350 215 662C180 774 159 818 116 858V254C116 183 151 137 214 115Z" fill="url(#shine)"/>
+
+  <!-- screenshot/crop frame -->
+  <g fill="none" stroke="#FFFFFF" stroke-width="56" stroke-linecap="round" stroke-linejoin="round" filter="url(#symbolShadow)">
+    <path d="M294 433V315C294 287 317 264 345 264H463"/>
+    <path d="M561 264H679C707 264 730 287 730 315V433"/>
+    <path d="M730 591V709C730 737 707 760 679 760H561"/>
+    <path d="M463 760H345C317 760 294 737 294 709V591"/>
+  </g>
+
+  <!-- right-click cursor -->
+  <g filter="url(#symbolShadow)">
+    <path d="M418 370C410 357 392 363 392 378V630C392 647 412 655 423 643L482 579L530 691C537 708 557 716 574 709L618 690C635 683 643 663 636 646L586 530H674C691 530 699 510 686 499L418 370Z"
+          fill="#FFFFFF" stroke="#FFFFFF" stroke-width="18" stroke-linejoin="round"/>
+    <path d="M563 374C596 342 648 342 681 374" fill="none" stroke="#FFFFFF" stroke-width="34" stroke-linecap="round"/>
+    <path d="M588 420C607 402 637 402 656 420" fill="none" stroke="#FFFFFF" stroke-width="28" stroke-linecap="round" opacity="0.82"/>
+  </g>
+</svg>
