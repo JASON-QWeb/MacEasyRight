@@ -20,6 +20,7 @@ enum HotkeyAction: String, CaseIterable {
         }
     }
 
+    @MainActor
     func perform() {
         switch self {
         case .capture:      ScreenshotController.shared.captureInteractive()
@@ -33,20 +34,41 @@ enum HotkeyAction: String, CaseIterable {
 
 // MARK: - Carbon 全局热键注册
 
+@MainActor
 final class HotkeyManager {
+    struct RegistrationFailure {
+        let action: HotkeyAction
+        let hotkey: HotkeyConfig
+        let status: OSStatus
+
+        var userMessage: String {
+            if status == eventHotKeyExistsErr {
+                return "\(action.label)：\(hotkeyDisplay(hotkey)) 已被系统或其他应用占用"
+            }
+            return "\(action.label)：\(hotkeyDisplay(hotkey)) 注册失败（错误码 \(status)）"
+        }
+    }
+
     static let shared = HotkeyManager()
 
     private var refs: [EventHotKeyRef] = []
     private var actions: [UInt32: () -> Void] = [:]
     private var nextId: UInt32 = 1
     private var handlerInstalled = false
+    private(set) var lastFailures: [RegistrationFailure] = []
 
-    func reload(config: EasyConfig) {
+    @discardableResult
+    func reload(config: EasyConfig) -> [RegistrationFailure] {
         unregisterAll()
+        var failures: [RegistrationFailure] = []
         for action in HotkeyAction.allCases {
             guard let hk = config.hotkeys[action.rawValue] else { continue }
-            register(hk) { action.perform() }
+            if let status = register(hk, action: { action.perform() }) {
+                failures.append(RegistrationFailure(action: action, hotkey: hk, status: status))
+            }
         }
+        lastFailures = failures
+        return failures
     }
 
     func unregisterAll() {
@@ -56,8 +78,9 @@ final class HotkeyManager {
         nextId = 1
     }
 
-    private func register(_ hk: HotkeyConfig, action: @escaping () -> Void) {
-        installHandlerIfNeeded()
+    private func register(_ hk: HotkeyConfig, action: @escaping () -> Void) -> OSStatus? {
+        let handlerStatus = installHandlerIfNeeded()
+        guard handlerStatus == noErr else { return handlerStatus }
         var ref: EventHotKeyRef?
         let hotKeyID = EventHotKeyID(signature: OSType(0x4553_5254), id: nextId) // "ESRT"
         let status = RegisterEventHotKey(UInt32(hk.keyCode), hk.modifiers, hotKeyID,
@@ -67,8 +90,10 @@ final class HotkeyManager {
             actions[nextId] = action
             nextId += 1
             NSLog("EasyRight: hotkey registered %@", hotkeyDisplay(hk))
+            return nil
         } else {
             NSLog("EasyRight: hotkey register FAILED %@ status=%d", hotkeyDisplay(hk), status)
+            return status
         }
     }
 
@@ -76,18 +101,23 @@ final class HotkeyManager {
         actions[id]?()
     }
 
-    private func installHandlerIfNeeded() {
-        guard !handlerInstalled else { return }
+    private func installHandlerIfNeeded() -> OSStatus {
+        guard !handlerInstalled else { return noErr }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                  eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetEventDispatcherTarget(), { _, event, _ -> OSStatus in
+        let status = InstallEventHandler(GetEventDispatcherTarget(), { _, event, _ -> OSStatus in
             var hkID = EventHotKeyID()
             GetEventParameter(event, EventParamName(kEventParamDirectObject),
                               EventParamType(typeEventHotKeyID), nil,
                               MemoryLayout<EventHotKeyID>.size, nil, &hkID)
-            DispatchQueue.main.async { HotkeyManager.shared.fire(hkID.id) }
+            let id = hkID.id
+            DispatchQueue.main.async { HotkeyManager.shared.fire(id) }
             return noErr
         }, 1, &spec, nil, nil)
-        handlerInstalled = true
+        handlerInstalled = status == noErr
+        if status != noErr {
+            NSLog("EasyRight: failed to install hotkey event handler status=%d", status)
+        }
+        return status
     }
 }

@@ -2,6 +2,7 @@ import AppKit
 
 // MARK: - 录屏流程编排:框选范围 → 设置面板(帧率/格式) → 开始 → 红框指示 → 停止落盘
 
+@MainActor
 final class Recorder {
     static let shared = Recorder()
 
@@ -42,7 +43,19 @@ final class Recorder {
                     var c = EasyConfig.load()
                     c.recordFPS = fps
                     c.recordFormat = format
-                    c.save()
+                    do {
+                        try c.save()
+                        NotificationCenter.default.post(
+                            name: .easyConfigChanged,
+                            object: self,
+                            userInfo: ["hotkeysChanged": false]
+                        )
+                    } catch {
+                        showWarning(
+                            title: "无法保存录屏默认参数",
+                            message: "本次仍会按所选参数录制，但下次启动不会记住它们。\n\n\(error.localizedDescription)"
+                        )
+                    }
                     startEngine(rect: finalRect, fps: fps, format: format)
                 },
                 onCancel: { [self] in
@@ -114,12 +127,22 @@ final class Recorder {
             NSWorkspace.shared.open(url)
         }
     }
+
+    private func showWarning(title: String, message: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
 }
 
 // MARK: - 录制设置 / 控制面板
 
+@MainActor
 final class RecordSetupPanel: NSObject {
-    private let panel: NSPanel
+    private let panel: FloatingHUDPanel
     private var rect: NSRect
     private let onStart: (NSRect, Int, String) -> Void
     private let onCancel: () -> Void
@@ -149,23 +172,8 @@ final class RecordSetupPanel: NSObject {
         self.onStart = onStart
         self.onCancel = onCancel
         self.onRectChanged = onRectChanged
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 340, height: 108),
-                        styleMask: [.borderless, .nonactivatingPanel],
-                        backing: .buffered, defer: false)
+        panel = FloatingHUDPanel()
         super.init()
-
-        panel.level = .screenSaver
-        panel.isFloatingPanel = true
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        panel.hasShadow = true
-        panel.isMovableByWindowBackground = true
-
-        let effect = NSVisualEffectView()
-        effect.material = .hudWindow
-        effect.state = .active
-        effect.wantsLayer = true
-        effect.layer?.cornerRadius = 10
 
         // --- 设置状态 ---
         sizeLabel.font = .systemFont(ofSize: 12)
@@ -218,16 +226,7 @@ final class RecordSetupPanel: NSObject {
         container.orientation = .vertical
         container.spacing = 0
 
-        effect.addSubview(container)
-        container.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            container.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-            container.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-            container.topAnchor.constraint(equalTo: effect.topAnchor),
-            container.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
-        ])
-        panel.contentView = effect
-        resizeToFit()
+        panel.setHUDContent(container)
         position()
         panel.orderFrontRegardless()
     }
@@ -251,11 +250,13 @@ final class RecordSetupPanel: NSObject {
         resizeToFit()
         position()
         startDate = Date()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self, let d = self.startDate else { return }
-            let s = Int(Date().timeIntervalSince(d))
-            self.timeLabel.stringValue = String(format: "%02d:%02d", s / 60, s % 60)
-        }
+        timer = Timer.scheduledTimer(
+            timeInterval: 1,
+            target: self,
+            selector: #selector(updateTimer),
+            userInfo: nil,
+            repeats: true
+        )
     }
 
     func close() {
@@ -272,6 +273,12 @@ final class RecordSetupPanel: NSObject {
         let fps = Self.fpsOptions[max(0, fpsPopup.indexOfSelectedItem)]
         let format = Self.formatOptions[max(0, formatPopup.indexOfSelectedItem)].value
         onStart(rect, fps, format)
+    }
+
+    @objc private func updateTimer() {
+        guard let startDate else { return }
+        let seconds = Int(Date().timeIntervalSince(startDate))
+        timeLabel.stringValue = String(format: "%02d:%02d", seconds / 60, seconds % 60)
     }
 
     @objc private func cancelClicked() {
@@ -301,22 +308,11 @@ final class RecordSetupPanel: NSObject {
     }
 
     private func resizeToFit() {
-        if let size = panel.contentView?.fittingSize {
-            panel.setContentSize(size)
-        }
+        panel.fitContent()
     }
 
     private func position() {
-        let size = panel.frame.size
-        var x = rect.midX - size.width / 2
-        var y = rect.minY - size.height - 10
-        let screen = NSScreen.screens.first { NSMouseInRect(NSPoint(x: rect.midX, y: rect.midY), $0.frame, false) }
-            ?? NSScreen.main
-        if let sf = screen?.visibleFrame {
-            if y < sf.minY { y = sf.minY + 12 } // 全屏时贴底部(录制画面里看不到,已被排除)
-            x = max(sf.minX + 8, min(x, sf.maxX - size.width - 8))
-        }
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
+        panel.position(relativeTo: rect, placement: .belowOrScreenBottom)
     }
 }
 

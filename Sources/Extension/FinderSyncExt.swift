@@ -2,61 +2,30 @@ import Cocoa
 import FinderSync
 
 @objc(EasyRightFinderSync)
-class EasyRightFinderSync: FIFinderSync {
+class EasyRightFinderSync: FIFinderSync, @unchecked Sendable {
     private struct NewFileRequest {
         let kind: NewFileKind
         let destination: String
     }
 
-    private var workspaceObservers: [NSObjectProtocol] = []
     private var newFileRequests: [Int: NewFileRequest] = [:]
     private var nextNewFileRequestID = 1
+    private var cachedConfig: EasyConfig?
+    private var cachedConfigModificationDate: Date?
+    private var cachedAvailableApps = Set<String>()
+    private var appCacheDate = Date.distantPast
 
     override init() {
         super.init()
         updateMonitoredDirectories()
-
-        // 外接磁盘 / 网络卷可能在扩展启动后才挂载,届时刷新监视目录。
-        let center = NSWorkspace.shared.notificationCenter
-        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
-            workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                self?.updateMonitoredDirectories()
-            })
-        }
-    }
-
-    deinit {
-        let center = NSWorkspace.shared.notificationCenter
-        for observer in workspaceObservers { center.removeObserver(observer) }
     }
 
     private func updateMonitoredDirectories() {
-        // Finder Sync 不会跨符号链接推导后代,因此同时加入常用根路径及其真实路径。
-        let basePaths = [
-            "/",
-            realHomePath(),
-            "/Users",
-            "/Applications",
-            "/Volumes",
-            "/private",
-            "/tmp",
-            NSTemporaryDirectory(),
-        ]
-        var urls = Set(basePaths.flatMap { path -> [URL] in
-            let url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
-            return [url, url.resolvingSymlinksInPath()]
-        })
-        let volumes = FileManager.default.mountedVolumeURLs(
-            includingResourceValuesForKeys: nil,
-            options: [.skipHiddenVolumes]
-        ) ?? []
-        for volume in volumes {
-            let url = URL(fileURLWithPath: volume.path, isDirectory: true).standardizedFileURL
-            urls.insert(url)
-            urls.insert(url.resolvingSymlinksInPath())
-        }
-        FIFinderSyncController.default().directoryURLs = urls
-        NSLog("EasyRightExt: monitoring %d roots", urls.count)
+        // Finder Sync 会递归覆盖 directoryURLs 的全部子目录；根目录已经包含
+        // /Users、/Applications、/Volumes 和 /private，无需维护重复集合。
+        let root = URL(fileURLWithPath: "/", isDirectory: true).standardizedFileURL
+        FIFinderSyncController.default().directoryURLs = [root]
+        NSLog("EasyRightExt: monitoring root directory")
     }
 
     // MARK: - 菜单构建
@@ -66,7 +35,7 @@ class EasyRightFinderSync: FIFinderSync {
         menu.autoenablesItems = false
         newFileRequests.removeAll()
         nextNewFileRequestID = 1
-        let cfg = EasyConfig.load()
+        let cfg = currentConfig()
         switch menuKind {
         case .contextualMenuForItems:
             buildItemsMenu(into: menu, cfg: cfg)
@@ -148,13 +117,30 @@ class EasyRightFinderSync: FIFinderSync {
 
     /// "进入终端 / 进入 VSCode …" 一类菜单项
     private func addAppItems(into menu: NSMenu, cfg: EasyConfig) {
+        refreshAvailableAppsIfNeeded()
         for known in kKnownApps where cfg.apps.contains(known.name) {
-            guard appURL(for: known) != nil else { continue }
+            guard cachedAvailableApps.contains(known.name) else { continue }
             let needSpace = known.name.first?.isASCII == true
             let title = needSpace ? "进入 \(known.name)" : "进入\(known.name)"
             let item = makeItem(title, #selector(openWithApp(_:)), represented: known.name)
             menu.addItem(item)
         }
+    }
+
+    private func currentConfig() -> EasyConfig {
+        let url = URL(fileURLWithPath: kConfigFilePath)
+        let modificationDate = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        if let cachedConfig, modificationDate == cachedConfigModificationDate { return cachedConfig }
+        let loaded = EasyConfig.load()
+        cachedConfig = loaded
+        cachedConfigModificationDate = modificationDate
+        return loaded
+    }
+
+    private func refreshAvailableAppsIfNeeded() {
+        guard Date().timeIntervalSince(appCacheDate) >= 60 || cachedAvailableApps.isEmpty else { return }
+        cachedAvailableApps = Set(kKnownApps.compactMap { appURL(for: $0) == nil ? nil : $0.name })
+        appCacheDate = Date()
     }
 
     private func folderSubmenu(action: Selector, chooseAction: Selector, cfg: EasyConfig) -> NSMenu {
@@ -210,16 +196,34 @@ class EasyRightFinderSync: FIFinderSync {
         return url.hasDirectoryPath
     }
 
-    private func send(_ cmd: Command) {
-        guard let url = encodeCommandURL(cmd) else { return }
-        NSWorkspace.shared.open(url)
+    private func send(_ cmd: Command, attemptsRemaining: Int = 20) {
+        if let token = CommandAuthentication.loadToken() {
+            guard let url = encodeCommandURL(cmd, token: token) else {
+                NSLog("EasyRightExt: failed to encode %@ command", cmd.action.rawValue)
+                return
+            }
+            NSWorkspace.shared.open(url)
+            return
+        }
+
+        guard attemptsRemaining > 0 else {
+            NSLog("EasyRightExt: command token unavailable; command dropped")
+            return
+        }
+        if attemptsRemaining == 20 {
+            // 主应用尚未运行过时，先让它创建仅本机可读的认证令牌。
+            NSWorkspace.shared.open(commandBootstrapURL())
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.send(cmd, attemptsRemaining: attemptsRemaining - 1)
+        }
     }
 
     @objc func createFile(_ sender: NSMenuItem) {
         guard let request = newFileRequests[sender.tag] else { return }
         NSLog("EasyRightExt: createFile %@ in %@", request.kind.rawValue, request.destination)
         send(Command(
-            action: "createFile",
+            action: .createFile,
             targets: [],
             dest: request.destination,
             fileKind: request.kind
@@ -228,57 +232,57 @@ class EasyRightFinderSync: FIFinderSync {
 
     @objc func copyToFolder(_ sender: NSMenuItem) {
         guard let dest = sender.representedObject as? String else { return }
-        send(Command(action: "copyTo", targets: selectedPaths(), dest: dest))
+        send(Command(action: .copyTo, targets: selectedPaths(), dest: dest))
     }
 
     @objc func moveToFolder(_ sender: NSMenuItem) {
         guard let dest = sender.representedObject as? String else { return }
-        send(Command(action: "moveTo", targets: selectedPaths(), dest: dest))
+        send(Command(action: .moveTo, targets: selectedPaths(), dest: dest))
     }
 
     @objc func copyToChosen(_ sender: NSMenuItem) {
-        send(Command(action: "copyChoose", targets: selectedPaths()))
+        send(Command(action: .copyChoose, targets: selectedPaths()))
     }
 
     @objc func moveToChosen(_ sender: NSMenuItem) {
-        send(Command(action: "moveChoose", targets: selectedPaths()))
+        send(Command(action: .moveChoose, targets: selectedPaths()))
     }
 
     @objc func cutItems(_ sender: NSMenuItem) {
-        send(Command(action: "cut", targets: selectedPaths()))
+        send(Command(action: .cut, targets: selectedPaths()))
     }
 
     @objc func pasteHere(_ sender: NSMenuItem) {
         guard let dest = containerPath() else { return }
-        send(Command(action: "paste", targets: [], dest: dest))
+        send(Command(action: .paste, targets: [], dest: dest))
     }
 
     @objc func pasteIntoSelectedFolder(_ sender: NSMenuItem) {
         guard let dest = selectedPaths().first else { return }
-        send(Command(action: "paste", targets: [], dest: dest))
+        send(Command(action: .paste, targets: [], dest: dest))
     }
 
     @objc func copyPath(_ sender: NSMenuItem) {
-        send(Command(action: "copyPath", targets: selectedPaths()))
+        send(Command(action: .copyPath, targets: selectedPaths()))
     }
 
     @objc func copyContainerPath(_ sender: NSMenuItem) {
         guard let dest = containerPath() else { return }
-        send(Command(action: "copyPath", targets: [dest]))
+        send(Command(action: .copyPath, targets: [dest]))
     }
 
     @objc func customIcon(_ sender: NSMenuItem) {
-        send(Command(action: "iconChoose", targets: selectedPaths()))
+        send(Command(action: .iconChoose, targets: selectedPaths()))
     }
 
     @objc func resetIcon(_ sender: NSMenuItem) {
-        send(Command(action: "iconReset", targets: selectedPaths()))
+        send(Command(action: .iconReset, targets: selectedPaths()))
     }
 
     @objc func openWithApp(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         var targets = selectedPaths()
         if targets.isEmpty, let container = containerPath() { targets = [container] }
-        send(Command(action: "open", targets: targets, app: name))
+        send(Command(action: .open, targets: targets, app: name))
     }
 }

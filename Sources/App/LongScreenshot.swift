@@ -3,24 +3,27 @@ import ApplicationServices
 
 // MARK: - 长截图:框选并调整范围 → 点「开始」 → 持续监控页面滚动并拼接 → 点「停止」保存
 
-final class LongScreenshot {
+final class LongScreenshot: @unchecked Sendable {
     static let shared = LongScreenshot()
 
     private var running = false
     private var stopRequested = false
+    private let stopLock = NSLock()
     private var panel: LongshotPanel?
     private var adjuster: RegionAdjustWindow?
     private var border: RecordBorderWindow?
     private var sourceApplication: NSRunningApplication?
+    private var frameSource: LongshotFrameSource?
 
     private let maxTotalHeight = 25000 // 像素
     private let maxSlices = 120
     private let maxDuration: TimeInterval = 600 // 10 分钟硬上限
 
     /// 快捷键 / 菜单入口:设置阶段 → 视为点「开始」;进行中 → 停止;否则进入框选
+    @MainActor
     func start() {
         if running {
-            stopRequested = true
+            requestStop()
             return
         }
         if let p = panel {
@@ -59,6 +62,7 @@ final class LongScreenshot {
         }
     }
 
+    @MainActor
     private func cancelSetup() {
         panel?.close()
         panel = nil
@@ -67,9 +71,10 @@ final class LongScreenshot {
         sourceApplication = nil
     }
 
+    @MainActor
     private func beginLoop(_ nsRect: NSRect, autoScroll: Bool) {
         running = true
-        stopRequested = false
+        setStopRequested(false)
         adjuster?.orderOut(nil)
         adjuster = nil
         border = RecordBorderWindow(around: nsRect)
@@ -78,38 +83,83 @@ final class LongScreenshot {
         sourceApplication?.activate(options: [.activateIgnoringOtherApps])
         let cgRect = cocoaToCG(nsRect)
         NSLog("EasyRight: longshot begin rect=%@ autoScroll=%d", NSStringFromRect(nsRect), autoScroll ? 1 : 0)
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
-            captureLoop(cgRect: cgRect, autoScroll: autoScroll)
+        let source = LongshotFrameSource()
+        frameSource = source
+        let center = CGPoint(x: cgRect.midX, y: cgRect.midY)
+        let scrollPoints = Int32(cgRect.height * 0.55)
+        Task { [weak self] in
+            do {
+                try await source.start(cgRect: cgRect)
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    self?.captureLoop(
+                        source: source,
+                        autoScroll: autoScroll,
+                        scrollLocation: center,
+                        scrollPoints: scrollPoints
+                    )
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.finish(nil, appended: 0, autoScroll: autoScroll,
+                                 failureMessage: "无法开始长截图：\n\(error.localizedDescription)")
+                }
+            }
         }
     }
 
-    private func captureLoop(cgRect: CGRect, autoScroll: Bool) {
-        let rectArg = String(format: "%.0f,%.0f,%.0f,%.0f",
-                             cgRect.origin.x, cgRect.origin.y, cgRect.width, cgRect.height)
-        let center = CGPoint(x: cgRect.midX, y: cgRect.midY)
-        var slices: [CGImage] = []
+    private func captureLoop(
+        source: LongshotFrameSource,
+        autoScroll: Bool,
+        scrollLocation: CGPoint,
+        scrollPoints: Int32
+    ) {
+        let store: LongshotSliceStore
+        do {
+            store = try LongshotSliceStore()
+        } catch {
+            finishOnMain(
+                nil,
+                appended: 0,
+                autoScroll: autoScroll,
+                failureMessage: "无法创建长截图临时目录：\n\(error.localizedDescription)"
+            )
+            return
+        }
         // acceptedFrame 永远是最后一张已经成功拼进结果的帧。匹配失败时不能推进它，
         // 否则滚动过程中的模糊/动态帧会吞掉一整段内容，手动模式尤其容易只剩首屏。
         var acceptedFrame: StitchFrame?
         var totalHeight = 0
         var frameIndex = 0
+        var generation = 0
         var endStreak = 0
         var matchFailureStreak = 0
+        var limitMessage: String?
         let startTime = Date()
 
         usleep(400_000) // 等调整层消失
 
-        while !stopRequested {
-            if slices.count >= maxSlices || totalHeight >= maxTotalHeight { break }
-            if Date().timeIntervalSince(startTime) > maxDuration { break }
-
-            let tmp = NSTemporaryDirectory() + "easyright-long-\(frameIndex % 4).png"
-            captureSync(rectArg: rectArg, to: tmp)
-            guard let (cg, frame) = loadFrame(tmp) else {
-                NSLog("EasyRight: longshot frame load failed")
+        while !isStopRequested() {
+            if store.count >= maxSlices {
+                limitMessage = "已达到 \(maxSlices) 个拼接片段上限，结果已保存到当前进度。"
                 break
             }
-            try? FileManager.default.removeItem(atPath: tmp)
+            if totalHeight >= maxTotalHeight {
+                limitMessage = "已达到 \(maxTotalHeight) 像素高度上限，结果已保存到当前进度。"
+                break
+            }
+            if Date().timeIntervalSince(startTime) > maxDuration {
+                limitMessage = "已达到 10 分钟时长上限，结果已保存到当前进度。"
+                break
+            }
+
+            guard let snapshot = source.nextFrame(after: generation, timeout: 2),
+                  let frame = makeFrame(snapshot.image) else {
+                if isStopRequested() { break }
+                NSLog("EasyRight: longshot frame unavailable")
+                break
+            }
+            generation = snapshot.generation
+            let cg = snapshot.image
 
             var allowNextAutoScroll = true
             var madeProgress = false
@@ -121,10 +171,16 @@ final class LongScreenshot {
                     matchFailureStreak = 0
                     let newRows = min(off, frame.height)
                     if let slice = copySlice(cg, fromRow: frame.height - newRows, rows: newRows) {
-                        slices.append(slice)
-                        totalHeight += newRows
-                        acceptedFrame = frame
-                        madeProgress = true
+                        do {
+                            try store.append(slice)
+                            totalHeight += newRows
+                            acceptedFrame = frame
+                            madeProgress = true
+                        } catch {
+                            finishOnMain(nil, appended: store.count, autoScroll: autoScroll,
+                                         failureMessage: "保存长截图片段失败：\n\(error.localizedDescription)")
+                            return
+                        }
                     }
                     NSLog("EasyRight: longshot frame %d offset=%d total=%d", frameIndex, off, totalHeight)
                 } else if offset == 0 {
@@ -146,15 +202,21 @@ final class LongScreenshot {
                           frameIndex, matchFailureStreak)
                 }
             } else {
-                slices.append(cg)
-                totalHeight += frame.height
-                acceptedFrame = frame
-                madeProgress = true
+                do {
+                    try store.append(cg)
+                    totalHeight += frame.height
+                    acceptedFrame = frame
+                    madeProgress = true
+                } catch {
+                    finishOnMain(nil, appended: 0, autoScroll: autoScroll,
+                                 failureMessage: "保存长截图首帧失败：\n\(error.localizedDescription)")
+                    return
+                }
             }
             frameIndex += 1
 
             let shownHeight = totalHeight
-            let shownCount = slices.count
+            let shownCount = store.count
             let progressText: String
             if matchFailureStreak >= 2 {
                 progressText = autoScroll ? "正在重新识别重叠区域…" : "未识别到重叠，请慢一点或稍向上回滚"
@@ -170,19 +232,52 @@ final class LongScreenshot {
             }
 
             if autoScroll && allowNextAutoScroll {
-                postScroll(totalPoints: Int32(cgRect.height * 0.55), at: center)
+                postScroll(totalPoints: scrollPoints, at: scrollLocation)
             }
             usleep(autoScroll ? 700_000 : 280_000)
         }
 
-        let result = compose(slices)
-        let appended = slices.count
-        DispatchQueue.main.async { [self] in
-            finish(result, appended: appended, autoScroll: autoScroll)
+        let result = store.compose()
+        let appended = store.count
+        let stoppedBeforeFirstFrame = isStopRequested() && appended == 0
+        finishOnMain(
+            result,
+            appended: appended,
+            autoScroll: autoScroll,
+            failureMessage: result == nil && !stoppedBeforeFirstFrame ? "长截图合成失败。" : nil,
+            noticeMessage: limitMessage
+        )
+    }
+
+    private func finishOnMain(
+        _ image: CGImage?,
+        appended: Int,
+        autoScroll: Bool,
+        failureMessage: String?,
+        noticeMessage: String? = nil
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            self?.finish(
+                image,
+                appended: appended,
+                autoScroll: autoScroll,
+                failureMessage: failureMessage,
+                noticeMessage: noticeMessage
+            )
         }
     }
 
-    private func finish(_ image: CGImage?, appended: Int, autoScroll: Bool) {
+    @MainActor
+    private func finish(
+        _ image: CGImage?,
+        appended: Int,
+        autoScroll: Bool,
+        failureMessage: String? = nil,
+        noticeMessage: String? = nil
+    ) {
+        let source = frameSource
+        frameSource = nil
+        Task { await source?.stop() }
         panel?.close()
         panel = nil
         border?.orderOut(nil)
@@ -191,7 +286,7 @@ final class LongScreenshot {
         running = false
         guard let image else {
             NSLog("EasyRight: longshot produced nothing")
-            ScreenshotController.shared.showPermissionAlert(kind: "长截图")
+            if let failureMessage { showLongshotError(failureMessage) }
             return
         }
         let nsImage = NSImage(cgImage: image, size: .zero)
@@ -201,6 +296,9 @@ final class LongScreenshot {
             NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: cfg.saveDir)
         }
         NSLog("EasyRight: longshot done %dx%d (%d slices)", image.width, image.height, appended)
+        if let noticeMessage {
+            showLongshotNotice(noticeMessage)
+        }
 
         if appended <= 1, autoScroll {
             NSApp.activate(ignoringOtherApps: true)
@@ -223,17 +321,7 @@ final class LongScreenshot {
 
     // MARK: 帧处理
 
-    private func captureSync(rectArg: String, to path: String) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        p.arguments = ["-R", rectArg, "-x", path]
-        try? p.run()
-        p.waitUntilExit()
-    }
-
-    private func loadFrame(_ path: String) -> (CGImage, StitchFrame)? {
-        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+    private func makeFrame(_ cg: CGImage) -> StitchFrame? {
         let w = cg.width, h = cg.height
         var pixels = [UInt8](repeating: 0, count: w * h * 4)
         guard let ctx = CGContext(data: &pixels, width: w, height: h,
@@ -241,7 +329,7 @@ final class LongScreenshot {
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
-        return (cg, StitchFrame(width: w, height: h, pixels: pixels))
+        return StitchFrame(width: w, height: h, pixels: pixels)
     }
 
     /// 从帧底部裁出新增内容并复制成独立位图(fromRow 以图像顶部为原点)
@@ -256,47 +344,63 @@ final class LongScreenshot {
         return ctx.makeImage()
     }
 
-    private func compose(_ slices: [CGImage]) -> CGImage? {
-        guard let first = slices.first else { return nil }
-        let w = first.width
-        let totalH = slices.reduce(0) { $0 + $1.height }
-        guard totalH > 0,
-              let ctx = CGContext(data: nil, width: w, height: totalH,
-                                  bitsPerComponent: 8, bytesPerRow: w * 4,
-                                  space: CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        var yFromTop = 0
-        for s in slices {
-            let cgY = totalH - yFromTop - s.height // CGContext 原点在左下
-            ctx.draw(s, in: CGRect(x: 0, y: cgY, width: s.width, height: s.height))
-            yFromTop += s.height
-        }
-        return ctx.makeImage()
-    }
-
     /// 分块发送滚轮事件:一次性大增量会被部分应用忽略,小步多次更接近真实滚动
-    private func postScroll(totalPoints: Int32, at center: CGPoint) {
-        CGWarpMouseCursorPosition(center)
-        usleep(30_000)
+    private func postScroll(totalPoints: Int32, at location: CGPoint) {
         let chunk: Int32 = 80
         var remaining = totalPoints
         while remaining > 0 {
             let step = min(chunk, remaining)
             if let e = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
                                wheelCount: 1, wheel1: -step, wheel2: 0, wheel3: 0) {
-                e.location = center
+                // 指定事件位置即可把滚轮发给选区下方窗口，无需移动真实鼠标。
+                e.location = location
                 e.post(tap: .cghidEventTap)
             }
             remaining -= step
             usleep(25_000)
         }
     }
+
+    private func requestStop() { setStopRequested(true) }
+
+    private func setStopRequested(_ value: Bool) {
+        stopLock.lock()
+        stopRequested = value
+        stopLock.unlock()
+    }
+
+    private func isStopRequested() -> Bool {
+        stopLock.lock()
+        defer { stopLock.unlock() }
+        return stopRequested
+    }
+
+    @MainActor
+    private func showLongshotError(_ message: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "长截图失败"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+
+    @MainActor
+    private func showLongshotNotice(_ message: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "长截图已达到安全上限"
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.runModal()
+    }
 }
 
 // MARK: - 长截图控制面板:设置阶段(自动滚动开关 + 开始/取消) → 监控阶段(进度 + 停止)
 
+@MainActor
 private final class LongshotPanel: NSObject {
-    private let panel: NSPanel
+    private let panel: FloatingHUDPanel
     private var rect: NSRect
     private let onStart: (Bool) -> Void
     private let onCancel: () -> Void
@@ -315,23 +419,8 @@ private final class LongshotPanel: NSObject {
         self.onStart = onStart
         self.onCancel = onCancel
         autoCheck = NSButton(checkboxWithTitle: "自动滚动(需辅助功能权限)", target: nil, action: nil)
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 340, height: 108),
-                        styleMask: [.borderless, .nonactivatingPanel],
-                        backing: .buffered, defer: false)
+        panel = FloatingHUDPanel()
         super.init()
-
-        panel.level = .screenSaver
-        panel.isFloatingPanel = true
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        panel.hasShadow = true
-        panel.isMovableByWindowBackground = true
-
-        let effect = NSVisualEffectView()
-        effect.material = .hudWindow
-        effect.state = .active
-        effect.wantsLayer = true
-        effect.layer?.cornerRadius = 10
 
         // --- 设置阶段 ---
         sizeLabel.font = .systemFont(ofSize: 12)
@@ -379,16 +468,7 @@ private final class LongshotPanel: NSObject {
         container.orientation = .vertical
         container.spacing = 0
 
-        effect.addSubview(container)
-        container.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            container.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-            container.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-            container.topAnchor.constraint(equalTo: effect.topAnchor),
-            container.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
-        ])
-        panel.contentView = effect
-        resizeToFit()
+        panel.setHUDContent(container)
         position()
         panel.orderFrontRegardless()
     }
@@ -439,7 +519,7 @@ private final class LongshotPanel: NSObject {
     }
 
     @objc private func grantAX() {
-        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(opts)
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
@@ -453,22 +533,10 @@ private final class LongshotPanel: NSObject {
     }
 
     private func resizeToFit() {
-        if let size = panel.contentView?.fittingSize {
-            panel.setContentSize(size)
-        }
+        panel.fitContent()
     }
 
     private func position() {
-        let size = panel.frame.size
-        var x = rect.midX - size.width / 2
-        var y = rect.minY - size.height - 10
-        let screen = NSScreen.screens.first { NSMouseInRect(NSPoint(x: rect.midX, y: rect.midY), $0.frame, false) }
-            ?? NSScreen.main
-        if let sf = screen?.visibleFrame {
-            if y < sf.minY { y = rect.maxY + 10 }
-            if y + size.height > sf.maxY { y = sf.minY + 12 }
-            x = max(sf.minX + 8, min(x, sf.maxX - size.width - 8))
-        }
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
+        panel.position(relativeTo: rect, placement: .belowOrAbove)
     }
 }

@@ -4,49 +4,71 @@ import SwiftUI
 
 extension Notification.Name {
     static let easyConfigChanged = Notification.Name("EasyConfigChanged")
+    static let hotkeyRegistrationFailed = Notification.Name("HotkeyRegistrationFailed")
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
     private var recordMenuItem: NSMenuItem?
-    private var pendingDashboardOpen: DispatchWorkItem?
-    private var launchedForCommand = false
-
     func applicationDidFinishLaunching(_ notification: Notification) {
+        var startupErrors: [String] = []
         // 首次启动写入默认配置,让扩展有配置可读
         if FileManager.default.contents(atPath: kConfigFilePath) == nil {
-            EasyConfig.defaultConfig().save()
+            do {
+                try EasyConfig.defaultConfig().save()
+            } catch {
+                NSLog("EasyRight: failed to create default config: %@", error.localizedDescription)
+                startupErrors.append("创建默认配置失败：\(error.localizedDescription)")
+            }
+        }
+        do {
+            _ = try CommandAuthentication.ensureToken()
+        } catch {
+            NSLog("EasyRight: failed to initialize command authentication: %@", error.localizedDescription)
+            startupErrors.append("初始化 Finder 指令认证失败：\(error.localizedDescription)")
         }
         setupStatusItem()
-        HotkeyManager.shared.reload(config: EasyConfig.load())
+        _ = HotkeyManager.shared.reload(config: EasyConfig.load())
 
-        NotificationCenter.default.addObserver(forName: .easyConfigChanged, object: nil, queue: .main) { [weak self] _ in
-            HotkeyManager.shared.reload(config: EasyConfig.load())
-            self?.rebuildStatusMenu()
-        }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(configChanged(_:)),
+            name: .easyConfigChanged,
+            object: nil
+        )
         Recorder.shared.onStateChange = { [weak self] in
             self?.updateRecordingUI()
         }
 
-        // 从 Finder / “应用程序”直接启动时展示 Dashboard。Finder 扩展通过 URL
-        // 唤起主应用执行命令时不弹设置窗口，避免干扰右键操作。
-        let dashboardOpen = DispatchWorkItem { [weak self] in
-            guard let self, !self.launchedForCommand else { return }
-            self.openSettings()
-        }
-        pendingDashboardOpen = dashboardOpen
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: dashboardOpen)
+        // 只在用户直接启动应用时展示 Dashboard。URL、文件、服务等非默认启动
+        // 由 AppKit 通过 launchIsDefaultUserInfoKey 明确标识，无需猜延迟。
+        let isDefaultLaunch = (notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? NSNumber)?.boolValue ?? true
+        if isDefaultLaunch { openSettings() }
+        if !startupErrors.isEmpty { showStartupErrors(startupErrors) }
         NSLog("EasyRight: launched")
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        launchedForCommand = true
-        pendingDashboardOpen?.cancel()
         for url in urls {
-            if let cmd = decodeCommand(from: url) {
-                CommandHandler.shared.handle(cmd)
+            if isCommandBootstrapURL(url) {
+                do {
+                    _ = try CommandAuthentication.ensureToken()
+                } catch {
+                    NSLog("EasyRight: command bootstrap failed: %@", error.localizedDescription)
+                    showStartupErrors([
+                        "初始化 Finder 指令认证失败：\(error.localizedDescription)"
+                    ])
+                }
+                continue
             }
+            guard let token = CommandAuthentication.loadToken(),
+                  let cmd = decodeCommand(from: url, expectedToken: token) else {
+                NSLog("EasyRight: rejected unauthenticated or malformed command URL")
+                continue
+            }
+            CommandHandler.shared.handle(cmd)
         }
     }
 
@@ -117,6 +139,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             btn.contentTintColor = recording ? .systemRed : nil
         }
+    }
+
+    @objc private func configChanged(_ note: Notification) {
+        guard note.userInfo?["hotkeysChanged"] as? Bool == true else { return }
+        let failures = HotkeyManager.shared.reload(config: EasyConfig.load())
+        rebuildStatusMenu()
+        if !failures.isEmpty {
+            NotificationCenter.default.post(
+                name: .hotkeyRegistrationFailed,
+                object: nil,
+                userInfo: ["message": failures.map(\.userMessage).joined(separator: "\n")]
+            )
+        }
+    }
+
+    private func showStartupErrors(_ errors: [String]) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "EasyRight 初始化失败"
+        alert.informativeText = errors.joined(separator: "\n\n")
+        alert.alertStyle = .critical
+        alert.runModal()
     }
 
     // MARK: - 动作

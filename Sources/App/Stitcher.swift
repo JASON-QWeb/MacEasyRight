@@ -2,18 +2,18 @@ import Foundation
 
 // MARK: - 长截图拼接算法(纯计算,不依赖 AppKit,便于单独测试)
 
-struct StitchFrame {
-    let width: Int
-    let height: Int
-    let bands: Int
+public struct StitchFrame {
+    public let width: Int
+    public let height: Int
+    public let bands: Int
 
     /// 每行切成多个横向小块后得到的感知哈希。忽略左右边缘，避免滚动条影响匹配。
-    let bandHashes: [UInt64]
+    public let bandHashes: [UInt64]
     /// 标记有纹理/文字的小块；匹配时不让大片纯色背景稀释真正的差异。
-    let informative: [Bool]
+    public let informative: [Bool]
 
     /// pixels 为 RGBA8888,行优先,width*4 字节一行
-    init(width: Int, height: Int, pixels: [UInt8]) {
+    public init(width: Int, height: Int, pixels: [UInt8]) {
         self.width = width
         self.height = height
 
@@ -69,12 +69,12 @@ struct StitchFrame {
     }
 }
 
-enum Stitcher {
+public enum Stitcher {
     /// 计算新帧相对上一张“已接受帧”向上滚动了多少像素。
     /// 返回 0 = 可见内容相同(未滚动/已到底);nil = 暂时找不到可靠重叠,调用方应保留旧基准后重试。
     /// skipTopFraction:忽略帧顶部区域(容忍网页吸顶导航栏)。
-    static func scrollOffset(prev: StitchFrame, cur: StitchFrame,
-                             skipTopFraction: Double = 0.15) -> Int? {
+    public static func scrollOffset(prev: StitchFrame, cur: StitchFrame,
+                                    skipTopFraction: Double = 0.15) -> Int? {
         guard prev.width == cur.width,
               prev.height == cur.height,
               prev.bands == cur.bands,

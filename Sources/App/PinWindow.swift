@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 // MARK: - 贴图管理
 
+@MainActor
 final class PinManager {
     static let shared = PinManager()
     private(set) var windows: [PinWindow] = []
@@ -117,14 +118,22 @@ final class PinWindow: NSWindow {
 
     init(image: NSImage, frame: NSRect) {
         self.image = image
-        self.aspect = image.size.height > 0 ? image.size.width / image.size.height : 1
+        self.aspect = image.size.width > 0 && image.size.height > 0
+            ? image.size.width / image.size.height
+            : 1
         super.init(contentRect: frame, styleMask: [.borderless, .resizable], backing: .buffered, defer: false)
         level = .floating
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         backgroundColor = .clear
         isOpaque = false
         hasShadow = true
-        minSize = NSSize(width: 60, height: 40)
+        contentAspectRatio = NSSize(
+            width: max(1, image.size.width),
+            height: max(1, image.size.height)
+        )
+        minSize = aspect >= 1
+            ? NSSize(width: 60, height: 60 / aspect)
+            : NSSize(width: 60 * aspect, height: 60)
 
         let view = PinCanvasView(image: image)
         view.wantsLayer = true
@@ -154,12 +163,13 @@ final class PinWindow: NSWindow {
 
     func scheduleToolbarHide(after seconds: TimeInterval = 0.8) {
         hideTimer?.invalidate()
-        hideTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            // 编辑状态下不隐藏
-            if self.canvas.tool != .move || self.canvas.isEditingText { return }
-            self.pinToolbar?.orderOut(nil)
-        }
+        hideTimer = Timer.scheduledTimer(
+            timeInterval: seconds,
+            target: self,
+            selector: #selector(hideToolbarTimerFired),
+            userInfo: nil,
+            repeats: false
+        )
     }
 
     func positionToolbar() {
@@ -173,6 +183,11 @@ final class PinWindow: NSWindow {
             x = max(sf.minX + 4, min(x, sf.maxX - size.width - 4))
         }
         tb.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    @objc private func hideToolbarTimerFired() {
+        if canvas.tool != .move || canvas.isEditingText { return }
+        pinToolbar?.orderOut(nil)
     }
 
     override func setFrame(_ frameRect: NSRect, display flag: Bool) {
@@ -270,10 +285,23 @@ final class PinWindow: NSWindow {
         panel.nameFieldStringValue = "贴图 \(df.string(from: Date())).png"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let out = canvas.compositedImage()
-        if let tiff = out.tiffRepresentation,
-           let rep = NSBitmapImageRep(data: tiff),
-           let png = rep.representation(using: .png, properties: [:]) {
-            try? png.write(to: url)
+        do {
+            guard let tiff = out.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff),
+                  let png = rep.representation(using: .png, properties: [:]) else {
+                throw NSError(
+                    domain: "EasyRight.Pin",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "无法把贴图编码为 PNG"]
+                )
+            }
+            try png.write(to: url, options: .atomic)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "保存贴图失败"
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .warning
+            alert.runModal()
         }
     }
 

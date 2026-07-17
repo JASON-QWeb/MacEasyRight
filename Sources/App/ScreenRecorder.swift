@@ -5,22 +5,27 @@ import AVFoundation
 // MARK: - 录屏引擎:ScreenCaptureKit 抓帧 → AVAssetWriter 编码
 // 支持任意区域、自定义帧率、MP4(H.264)/MOV(HEVC),并把本 App 的窗口(控制条、红框、贴图工具栏)从画面中排除
 
-final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
+final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
 
     private var stream: SCStream?
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
     private var sessionStarted = false
     private var outputURL: URL?
-    private var onFinished: ((URL?) -> Void)?
+    private var onFinished: (@MainActor @Sendable (URL?) -> Void)?
     private let sampleQueue = DispatchQueue(label: "com.diy.easyright.record")
+    private let stateLock = NSLock()
+    private var recording = false
 
-    private(set) var isRecording = false
+    var isRecording: Bool {
+        withLockedState { recording }
+    }
 
+    @MainActor
     func start(cocoaRect: NSRect, fps: Int, format: String,
-               onStarted: @escaping () -> Void,
-               onFailed: @escaping (String) -> Void,
-               onFinished: @escaping (URL?) -> Void) {
+               onStarted: @escaping @MainActor @Sendable () -> Void,
+               onFailed: @escaping @MainActor @Sendable (String) -> Void,
+               onFinished: @escaping @MainActor @Sendable (URL?) -> Void) {
         guard !isRecording else { return }
         self.onFinished = onFinished
         let cgRect = cocoaToCG(cocoaRect)
@@ -35,6 +40,7 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
         }
     }
 
+    @MainActor
     private func begin(cgRect: CGRect, fps: Int, format: String) async throws {
         // 找到区域所在显示器(权限未授予时这一步会抛错并触发系统引导)
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -78,9 +84,13 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
 
         // 输出文件与编码器
         let c = EasyConfig.load()
-        try? FileManager.default.createDirectory(atPath: c.saveDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: c.saveDir, withIntermediateDirectories: true)
         let isMP4 = format == "mp4"
-        let url = URL(fileURLWithPath: c.saveDir + "/录屏 \(ScreenshotController.shared.timestamp()).\(isMP4 ? "mp4" : "mov")")
+        let url = ScreenshotController.shared.uniqueOutputURL(
+            directory: c.saveDir,
+            baseName: "录屏 \(ScreenshotController.shared.timestamp())",
+            extension: isMP4 ? "mp4" : "mov"
+        )
         let w = try AVAssetWriter(url: url, fileType: isMP4 ? .mp4 : .mov)
         let settings: [String: Any] = [
             AVVideoCodecKey: isMP4 ? AVVideoCodecType.h264 : AVVideoCodecType.hevc,
@@ -89,6 +99,13 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
         ]
         let inp = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         inp.expectsMediaDataInRealTime = true
+        guard w.canAdd(inp) else {
+            throw NSError(
+                domain: "EasyRight",
+                code: 4,
+                userInfo: [NSLocalizedDescriptionKey: "编码器不接受当前视频参数"]
+            )
+        }
         w.add(inp)
         guard w.startWriting() else {
             throw w.error ?? NSError(domain: "EasyRight", code: 3,
@@ -97,22 +114,26 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
 
         let s = SCStream(filter: filter, configuration: cfg, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
+        withLockedState {
+            stream = s
+            writer = w
+            input = inp
+            outputURL = url
+            sessionStarted = false
+        }
         try await s.startCapture()
 
-        stream = s
-        writer = w
-        input = inp
-        outputURL = url
-        sessionStarted = false
-        isRecording = true
+        withLockedState { recording = true }
         NSLog("EasyRight: SCK recording started %dx%d @%dfps -> %@", pw, ph, fps, url.lastPathComponent)
     }
 
     // MARK: 帧回调
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, sampleBuffer.isValid, isRecording,
-              let writer, let input else { return }
+        guard type == .screen, sampleBuffer.isValid else { return }
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard recording, let writer, let input else { return }
         // 只写完整帧
         guard let atts = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let statusRaw = atts.first?[.status] as? Int,
@@ -133,23 +154,30 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
 
     // MARK: 停止
 
+    @MainActor
     func stop(stopStream: Bool = true) {
-        guard isRecording else { return }
-        isRecording = false
-        let s = stream
-        let w = writer
-        let inp = input
-        let url = outputURL
-        let started = sessionStarted
-        let cb = onFinished
-        stream = nil
-        writer = nil
-        input = nil
-        outputURL = nil
-        onFinished = nil
+        let captured: (SCStream?, AVAssetWriter?, AVAssetWriterInput?, URL?, Bool, (@MainActor @Sendable (URL?) -> Void)?)? = withLockedState {
+            guard recording else { return nil }
+            recording = false
+            let values = (stream, writer, input, outputURL, sessionStarted, onFinished)
+            stream = nil
+            writer = nil
+            input = nil
+            outputURL = nil
+            onFinished = nil
+            sessionStarted = false
+            return values
+        }
+        guard let (s, w, inp, url, started, cb) = captured else { return }
 
         Task {
-            if stopStream { try? await s?.stopCapture() }
+            if stopStream, let s {
+                do {
+                    try await s.stopCapture()
+                } catch {
+                    NSLog("EasyRight: recording stream stop failed: %@", error.localizedDescription)
+                }
+            }
             inp?.markAsFinished()
             if let w, started, w.status == .writing {
                 await w.finishWriting()
@@ -159,20 +187,48 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
                 }
             } else {
                 w?.cancelWriting()
-                if let url { try? FileManager.default.removeItem(at: url) }
+                if let url {
+                    do {
+                        if FileManager.default.fileExists(atPath: url.path) {
+                            try FileManager.default.removeItem(at: url)
+                        }
+                    } catch {
+                        NSLog("EasyRight: failed to remove empty recording: %@", error.localizedDescription)
+                    }
+                }
                 await MainActor.run { cb?(nil) }
             }
         }
     }
 
+    @MainActor
     private func abortAfterFailure() {
-        if let w = writer, w.status == .writing { w.cancelWriting() }
-        if let url = outputURL { try? FileManager.default.removeItem(at: url) }
-        stream = nil
-        writer = nil
-        input = nil
-        outputURL = nil
-        onFinished = nil
-        isRecording = false
+        let captured: (AVAssetWriter?, URL?) = withLockedState {
+            let values = (writer, outputURL)
+            stream = nil
+            writer = nil
+            input = nil
+            outputURL = nil
+            onFinished = nil
+            sessionStarted = false
+            recording = false
+            return values
+        }
+        if let writer = captured.0, writer.status == .writing { writer.cancelWriting() }
+        if let url = captured.1 {
+            do {
+                if FileManager.default.fileExists(atPath: url.path) {
+                    try FileManager.default.removeItem(at: url)
+                }
+            } catch {
+                NSLog("EasyRight: failed to remove incomplete recording: %@", error.localizedDescription)
+            }
+        }
+    }
+
+    private func withLockedState<T>(_ body: () -> T) -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return body()
     }
 }

@@ -9,29 +9,72 @@ SDK=$(xcrun --show-sdk-path)
 BUILD=build
 APP="$BUILD/EasyRight.app"
 APPEX="$APP/Contents/PlugIns/EasyRightExt.appex"
+APP_BINARY="$APP/Contents/MacOS/EasyRight"
+EXT_BINARY="$APPEX/Contents/MacOS/EasyRightExt"
+APP_STAMP="$BUILD/.app-source-fingerprint"
+EXT_STAMP="$BUILD/.extension-source-fingerprint"
+APP_SOURCES=(Sources/Shared/*.swift Sources/App/*.swift)
+EXT_SOURCES=(Sources/Shared/*.swift Sources/Extension/*.swift)
 
-echo "==> 清理并创建 bundle 结构"
-rm -rf "$BUILD"
+if [ "${1:-}" = "clean" ]; then
+    echo "==> 清理构建产物"
+    rm -rf "$BUILD"
+fi
+
+source_fingerprint() {
+    local target_name=$1
+    shift
+    {
+        printf '%s\n' "$target_name" "$TARGET" "$SDK"
+        swiftc --version 2>&1
+        for input in "$@"; do
+            printf '%s\n' "$input"
+            shasum -a 256 "$input"
+        done
+    } | shasum -a 256 | awk '{print $1}'
+}
+
+needs_rebuild() {
+    local output=$1
+    local stamp=$2
+    local expected=$3
+    [ ! -f "$output" ] || [ ! -f "$stamp" ] || [ "$(<"$stamp")" != "$expected" ]
+}
+
+echo "==> 创建 bundle 结构"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APPEX/Contents/MacOS"
 
-echo "==> 编译主应用 EasyRight"
-swiftc -O \
-    -module-name EasyRight \
-    -target "$TARGET" -sdk "$SDK" \
-    Sources/Shared/*.swift Sources/App/*.swift \
-    -framework AppKit -framework SwiftUI -framework FinderSync \
-    -o "$APP/Contents/MacOS/EasyRight"
+APP_FINGERPRINT=$(source_fingerprint "EasyRight app -O v1" "${APP_SOURCES[@]}" build.sh)
+EXT_FINGERPRINT=$(source_fingerprint "EasyRight extension -O v1" "${EXT_SOURCES[@]}" build.sh)
 
-echo "==> 编译 Finder 扩展 EasyRightExt"
-swiftc -O \
-    -module-name EasyRightExt \
-    -parse-as-library \
-    -application-extension \
-    -target "$TARGET" -sdk "$SDK" \
-    Sources/Shared/*.swift Sources/Extension/*.swift \
-    -framework AppKit -framework Foundation -framework FinderSync \
-    -Xlinker -e -Xlinker _NSExtensionMain \
-    -o "$APPEX/Contents/MacOS/EasyRightExt"
+if needs_rebuild "$APP_BINARY" "$APP_STAMP" "$APP_FINGERPRINT"; then
+    echo "==> 编译主应用 EasyRight"
+    swiftc -O \
+        -module-name EasyRight \
+        -target "$TARGET" -sdk "$SDK" \
+        "${APP_SOURCES[@]}" \
+        -framework AppKit -framework SwiftUI -framework FinderSync \
+        -o "$APP_BINARY"
+    printf '%s\n' "$APP_FINGERPRINT" > "$APP_STAMP"
+else
+    echo "==> 主应用源码未变化，跳过编译"
+fi
+
+if needs_rebuild "$EXT_BINARY" "$EXT_STAMP" "$EXT_FINGERPRINT"; then
+    echo "==> 编译 Finder 扩展 EasyRightExt"
+    swiftc -O \
+        -module-name EasyRightExt \
+        -parse-as-library \
+        -application-extension \
+        -target "$TARGET" -sdk "$SDK" \
+        "${EXT_SOURCES[@]}" \
+        -framework AppKit -framework Foundation -framework FinderSync \
+        -Xlinker -e -Xlinker _NSExtensionMain \
+        -o "$EXT_BINARY"
+    printf '%s\n' "$EXT_FINGERPRINT" > "$EXT_STAMP"
+else
+    echo "==> Finder 扩展源码未变化，跳过编译"
+fi
 
 echo "==> 拷贝 Info.plist"
 cp Resources/App-Info.plist "$APP/Contents/Info.plist"

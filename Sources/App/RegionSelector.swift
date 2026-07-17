@@ -2,6 +2,7 @@ import AppKit
 
 // MARK: - 自绘屏幕选区(用于「截图并贴图」和「长截图」)
 
+@MainActor
 final class RegionSelector {
     private static var current: RegionSelector?
 
@@ -39,7 +40,7 @@ final class RegionSelector {
     }
 }
 
-/// Cocoa 屏幕坐标(左下原点) → CG 全局坐标(主屏左上原点),供 screencapture -R 使用
+/// Cocoa 屏幕坐标(左下原点) → CG 全局坐标(主屏左上原点),供屏幕抓取 API 使用
 func cocoaToCG(_ r: NSRect) -> CGRect {
     let primaryMaxY = NSScreen.screens.first?.frame.maxY ?? 0
     return CGRect(x: r.origin.x, y: primaryMaxY - r.maxY, width: r.width, height: r.height)

@@ -36,9 +36,16 @@ RENDER_DIR=$(mktemp -d "${TMPDIR:-/tmp}/easyright-background.XXXXXX")
 MOUNT_DIR=""
 MOUNT_DEVICE=""
 
+detach_image() {
+    local device=$1
+    if hdiutil detach "$device" >/dev/null 2>&1; then return 0; fi
+    echo "==> 临时 DMG 被 Finder 扩展占用，改用强制卸载"
+    hdiutil detach -force "$device" >/dev/null
+}
+
 cleanup() {
     if [ -n "$MOUNT_DEVICE" ]; then
-        hdiutil detach "$MOUNT_DEVICE" >/dev/null 2>&1 || true
+        detach_image "$MOUNT_DEVICE" >/dev/null 2>&1 || true
     fi
     find "$RENDER_DIR" -mindepth 1 -delete >/dev/null 2>&1 || true
     rmdir "$RENDER_DIR" >/dev/null 2>&1 || true
@@ -59,8 +66,11 @@ if [ ! -f "$BACKGROUND_PNG" ]; then
 fi
 
 echo "==> 创建可写 DMG"
+APP_SIZE_KB=$(du -sk build/EasyRight.app | awk '{print $1}')
+DMG_SIZE_MB=$((APP_SIZE_KB * 2 / 1024 + 16))
+if [ "$DMG_SIZE_MB" -lt 32 ]; then DMG_SIZE_MB=32; fi
 hdiutil create \
-    -size 32m \
+    -size "${DMG_SIZE_MB}m" \
     -fs HFS+ \
     -volname "$VOLUME_NAME" \
     -ov \
@@ -103,7 +113,7 @@ delay 2
 APPLESCRIPT
 
 sync
-hdiutil detach "$MOUNT_DEVICE" >/dev/null
+detach_image "$MOUNT_DEVICE"
 MOUNT_DEVICE=""
 
 echo "==> 压缩并签名 DMG"

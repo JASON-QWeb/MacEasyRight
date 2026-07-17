@@ -3,7 +3,7 @@ import AppKit
 
 // MARK: - 已知可打开的 App
 
-public struct KnownApp {
+public struct KnownApp: Sendable {
     public let name: String
     public let bundleIds: [String]
     /// true = 终端类,只打开文件夹(文件则打开其所在目录);false = 编辑器类,直接打开选中项
@@ -46,10 +46,22 @@ public func realHomePath() -> String {
 public let kConfigDirPath = realHomePath() + "/Library/Application Support/EasyRight"
 public let kConfigFilePath = kConfigDirPath + "/config.json"
 public let kStateFilePath = kConfigDirPath + "/state.json"
+public let kCommandTokenFilePath = kConfigDirPath + "/command-token"
+
+private func writePrivateData(_ data: Data, to path: String) throws {
+    try FileManager.default.createDirectory(
+        atPath: kConfigDirPath,
+        withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o700]
+    )
+    let url = URL(fileURLWithPath: path)
+    try data.write(to: url, options: .atomic)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+}
 
 // MARK: - 全局快捷键(modifiers 为 Carbon 修饰键位:⌘256 ⇧512 ⌥2048 ⌃4096)
 
-public struct HotkeyConfig: Codable, Equatable {
+public struct HotkeyConfig: Codable, Equatable, Sendable {
     public var keyCode: UInt16
     public var modifiers: UInt32
 
@@ -61,7 +73,7 @@ public struct HotkeyConfig: Codable, Equatable {
 
 // MARK: - 配置
 
-public struct EasyConfig: Codable {
+public struct EasyConfig: Codable, Equatable, Sendable {
     public var folders: [String]
     public var apps: [String]
     public var showNewFile: Bool
@@ -126,7 +138,11 @@ public struct EasyConfig: Codable {
             var recordFormat: String?
             var hotkeys: [String: HotkeyConfig]?
         }
-        guard let raw = try? JSONDecoder().decode(Raw.self, from: data) else {
+        let raw: Raw
+        do {
+            raw = try JSONDecoder().decode(Raw.self, from: data)
+        } catch {
+            NSLog("EasyRight: invalid config file, using defaults: %@", error.localizedDescription)
             return defaultConfig()
         }
         let d = defaultConfig()
@@ -147,45 +163,77 @@ public struct EasyConfig: Codable {
         )
     }
 
-    public func save() {
-        try? FileManager.default.createDirectory(atPath: kConfigDirPath, withIntermediateDirectories: true)
+    public func save() throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(self) {
-            try? data.write(to: URL(fileURLWithPath: kConfigFilePath))
-        }
+        let data = try encoder.encode(self)
+        try writePrivateData(data, to: kConfigFilePath)
     }
 }
 
 // MARK: - 剪切状态
 
-public struct CutState: Codable {
+public struct CutState: Codable, Sendable {
     public var paths: [String]
 
     public init(paths: [String]) { self.paths = paths }
 
     public static func load() -> CutState? {
-        guard let data = FileManager.default.contents(atPath: kStateFilePath),
-              let state = try? JSONDecoder().decode(CutState.self, from: data),
-              !state.paths.isEmpty else { return nil }
+        guard let data = FileManager.default.contents(atPath: kStateFilePath) else { return nil }
+        let state: CutState
+        do {
+            state = try JSONDecoder().decode(CutState.self, from: data)
+        } catch {
+            NSLog("EasyRight: invalid cut state: %@", error.localizedDescription)
+            return nil
+        }
+        guard !state.paths.isEmpty else { return nil }
         return state
     }
 
-    public func save() {
-        try? FileManager.default.createDirectory(atPath: kConfigDirPath, withIntermediateDirectories: true)
-        if let data = try? JSONEncoder().encode(self) {
-            try? data.write(to: URL(fileURLWithPath: kStateFilePath))
-        }
+    public func save() throws {
+        let data = try JSONEncoder().encode(self)
+        try writePrivateData(data, to: kStateFilePath)
     }
 
-    public static func clear() {
-        try? FileManager.default.removeItem(atPath: kStateFilePath)
+    public static func clear() throws {
+        guard FileManager.default.fileExists(atPath: kStateFilePath) else { return }
+        try FileManager.default.removeItem(atPath: kStateFilePath)
     }
 }
 
 // MARK: - 扩展 → 主应用 的指令(经 easyright:// URL 传递)
 
-public enum NewFileKind: String, Codable, CaseIterable {
+public enum CommandAuthentication {
+    /// 主应用首次启动时创建；Finder 扩展只有读取权限。
+    public static func ensureToken() throws -> String {
+        if let existing = loadToken() { return existing }
+        let token = (UUID().uuidString + UUID().uuidString)
+            .replacingOccurrences(of: "-", with: "")
+            .lowercased()
+        try writePrivateData(Data(token.utf8), to: kCommandTokenFilePath)
+        return token
+    }
+
+    public static func loadToken() -> String? {
+        guard let data = FileManager.default.contents(atPath: kCommandTokenFilePath),
+              let token = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              token.count >= 32 else { return nil }
+        return token
+    }
+
+    public static func matches(_ candidate: String, expected: String) -> Bool {
+        let lhs = Array(candidate.utf8)
+        let rhs = Array(expected.utf8)
+        guard lhs.count == rhs.count else { return false }
+        var difference: UInt8 = 0
+        for index in lhs.indices { difference |= lhs[index] ^ rhs[index] }
+        return difference == 0
+    }
+}
+
+public enum NewFileKind: String, Codable, CaseIterable, Sendable {
     case txt
     case md
     case json
@@ -206,15 +254,36 @@ public enum NewFileKind: String, Codable, CaseIterable {
     }
 }
 
-public struct Command: Codable {
-    public var action: String
+public enum CommandAction: String, Codable, CaseIterable, Sendable {
+    case createFile
+    case copyTo
+    case moveTo
+    case copyChoose
+    case moveChoose
+    case cut
+    case paste
+    case copyPath
+    case iconChoose
+    case iconReset
+    case open
+    case screenshot
+    case screenshotPin
+    case pinClipboard
+    case record
+    case longshot
+    case closePins
+    case settings
+}
+
+public struct Command: Codable, Sendable {
+    public var action: CommandAction
     public var targets: [String]
     public var dest: String?
     public var app: String?
     public var fileKind: NewFileKind?
 
     public init(
-        action: String,
+        action: CommandAction,
         targets: [String],
         dest: String? = nil,
         app: String? = nil,
@@ -228,8 +297,14 @@ public struct Command: Codable {
     }
 }
 
-public func encodeCommandURL(_ cmd: Command) -> URL? {
-    guard let data = try? JSONEncoder().encode(cmd) else { return nil }
+private struct CommandEnvelope: Codable {
+    let token: String
+    let command: Command
+}
+
+public func encodeCommandURL(_ cmd: Command, token: String) -> URL? {
+    let envelope = CommandEnvelope(token: token, command: cmd)
+    guard let data = try? JSONEncoder().encode(envelope) else { return nil }
     let b64 = data.base64EncodedString()
         .replacingOccurrences(of: "+", with: "-")
         .replacingOccurrences(of: "/", with: "_")
@@ -237,13 +312,25 @@ public func encodeCommandURL(_ cmd: Command) -> URL? {
     return URL(string: "easyright://cmd?d=\(b64)")
 }
 
-public func decodeCommand(from url: URL) -> Command? {
-    guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+public func commandBootstrapURL() -> URL {
+    URL(string: "easyright://bootstrap")!
+}
+
+public func isCommandBootstrapURL(_ url: URL) -> Bool {
+    url.scheme?.lowercased() == "easyright" && url.host?.lowercased() == "bootstrap"
+}
+
+public func decodeCommand(from url: URL, expectedToken: String) -> Command? {
+    guard url.scheme?.lowercased() == "easyright",
+          url.host?.lowercased() == "cmd",
+          let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
           let d = comps.queryItems?.first(where: { $0.name == "d" })?.value else { return nil }
     var b64 = d
         .replacingOccurrences(of: "-", with: "+")
         .replacingOccurrences(of: "_", with: "/")
     while b64.count % 4 != 0 { b64 += "=" }
     guard let data = Data(base64Encoded: b64) else { return nil }
-    return try? JSONDecoder().decode(Command.self, from: data)
+    guard let envelope = try? JSONDecoder().decode(CommandEnvelope.self, from: data),
+          CommandAuthentication.matches(envelope.token, expected: expectedToken) else { return nil }
+    return envelope.command
 }
