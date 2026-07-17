@@ -16,10 +16,10 @@ EasyRight 是 超级右键 + PixPin 核心功能的聚合体，为 Mac用户 增
 - 剪切、粘贴文件
 - 拷贝文件或当前文件夹路径
 - 自定义文件、文件夹图标
-- 使用终端、iTerm2、VS Code、Cursor、Sublime Text、Zed、Emacs 或 Warp 打开
+- 快速启动或切换到终端、iTerm2、VS Code、Cursor、Sublime Text、Zed、Emacs 或 Warp
 - 自动识别已安装的应用，只显示可用菜单项
 
-右键 Finder 空白处时，也可粘贴文件、拷贝当前路径或在终端和编辑器中打开当前目录。
+右键 Finder 空白处时，也可粘贴文件、拷贝当前路径，或快速启动和切换终端与编辑器。
 
 ### 截图、贴图与录屏
 

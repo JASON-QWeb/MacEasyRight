@@ -111,6 +111,18 @@ tests.expect(
     "bootstrap URL is recognized separately"
 )
 
+let openCommand = Command(action: .open, targets: [], app: "Cursor")
+let openCommandURL = encodeCommandURL(openCommand, token: commandToken)
+let decodedOpenCommand = openCommandURL.flatMap {
+    decodeCommand(from: $0, expectedToken: commandToken)
+}
+tests.expect(
+    decodedOpenCommand?.action == .open &&
+        decodedOpenCommand?.targets.isEmpty == true &&
+        decodedOpenCommand?.app == "Cursor",
+    "launch-only app command round-trips without Finder targets"
+)
+
 let defaultHotkeys = EasyConfig.defaultHotkeys()
 tests.expect(defaultHotkeys.count == 3, "only three default global hotkeys remain")
 tests.expect(

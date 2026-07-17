@@ -6,25 +6,22 @@ import AppKit
 public struct KnownApp: Sendable {
     public let name: String
     public let bundleIds: [String]
-    /// true = 终端类,只打开文件夹(文件则打开其所在目录);false = 编辑器类,直接打开选中项
-    public let opensFolderOnly: Bool
 
-    public init(name: String, bundleIds: [String], opensFolderOnly: Bool) {
+    public init(name: String, bundleIds: [String]) {
         self.name = name
         self.bundleIds = bundleIds
-        self.opensFolderOnly = opensFolderOnly
     }
 }
 
 public let kKnownApps: [KnownApp] = [
-    KnownApp(name: "终端", bundleIds: ["com.apple.Terminal"], opensFolderOnly: true),
-    KnownApp(name: "iTerm2", bundleIds: ["com.googlecode.iterm2"], opensFolderOnly: true),
-    KnownApp(name: "Warp", bundleIds: ["dev.warp.Warp-Stable"], opensFolderOnly: true),
-    KnownApp(name: "VSCode", bundleIds: ["com.microsoft.VSCode"], opensFolderOnly: false),
-    KnownApp(name: "Cursor", bundleIds: ["com.todesktop.230313mzl4w4u92"], opensFolderOnly: false),
-    KnownApp(name: "Sublime Text", bundleIds: ["com.sublimetext.4", "com.sublimetext.3"], opensFolderOnly: false),
-    KnownApp(name: "Zed", bundleIds: ["dev.zed.Zed"], opensFolderOnly: false),
-    KnownApp(name: "Emacs", bundleIds: ["org.gnu.Emacs"], opensFolderOnly: false),
+    KnownApp(name: "终端", bundleIds: ["com.apple.Terminal"]),
+    KnownApp(name: "iTerm2", bundleIds: ["com.googlecode.iterm2"]),
+    KnownApp(name: "Warp", bundleIds: ["dev.warp.Warp-Stable"]),
+    KnownApp(name: "VSCode", bundleIds: ["com.microsoft.VSCode"]),
+    KnownApp(name: "Cursor", bundleIds: ["com.todesktop.230313mzl4w4u92"]),
+    KnownApp(name: "Sublime Text", bundleIds: ["com.sublimetext.4", "com.sublimetext.3"]),
+    KnownApp(name: "Zed", bundleIds: ["dev.zed.Zed"]),
+    KnownApp(name: "Emacs", bundleIds: ["org.gnu.Emacs"]),
 ]
 
 public func appURL(for known: KnownApp) -> URL? {

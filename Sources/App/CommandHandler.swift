@@ -23,7 +23,7 @@ final class CommandHandler {
         case .copyPath:   copyPath(cmd.targets)
         case .iconChoose: chooseIcon(for: cmd.targets)
         case .iconReset:  resetIcon(for: cmd.targets)
-        case .open:       open(cmd.targets, appName: cmd.app)
+        case .open:       open(appName: cmd.app)
         // 截图/录屏也可由 Finder 扩展通过已认证的 easyright:// URL 触发。
         case .screenshot:    ScreenshotController.shared.captureInteractive()
         case .screenshotPin: ScreenshotController.shared.captureAndPin()
@@ -55,7 +55,9 @@ final class CommandHandler {
         case .paste:
             return isDirectory(cmd.dest)
         case .open:
-            return targetsExist() && cmd.app != nil
+            // targets 可能来自尚未重载的旧扩展，为了升级兼容直接忽略。
+            return cmd.dest == nil && cmd.fileKind == nil &&
+                kKnownApps.contains { $0.name == cmd.app }
         case .screenshot, .screenshotPin, .pinClipboard, .record, .longshot, .closePins, .settings:
             return cmd.targets.isEmpty && cmd.dest == nil && cmd.app == nil && cmd.fileKind == nil
         }
@@ -210,29 +212,30 @@ final class CommandHandler {
         }
     }
 
-    // MARK: - 用 App 打开
+    // MARK: - 启动 App
 
-    private func open(_ paths: [String], appName: String?) {
-        guard let appName, !paths.isEmpty,
-              let known = kKnownApps.first(where: { $0.name == appName }),
-              let application = appURL(for: known) else { return }
-
-        var urls: [URL] = []
-        if known.opensFolderOnly {
-            // 终端类:文件 → 其所在目录;文件夹 → 自身;去重
-            var seen = Set<String>()
-            for p in paths {
-                var isDir: ObjCBool = false
-                fm.fileExists(atPath: p, isDirectory: &isDir)
-                let dir = isDir.boolValue ? p : (p as NSString).deletingLastPathComponent
-                if seen.insert(dir).inserted {
-                    urls.append(URL(fileURLWithPath: dir, isDirectory: true))
-                }
-            }
-        } else {
-            urls = paths.map { URL(fileURLWithPath: $0) }
+    private func open(appName: String?) {
+        guard let appName,
+              let known = kKnownApps.first(where: { $0.name == appName }) else { return }
+        guard let application = appURL(for: known) else {
+            NSLog("EasyRight: application %@ is no longer available", appName)
+            showError("未找到「\(appName)」，请确认该应用已安装。")
+            return
         }
-        NSWorkspace.shared.open(urls, withApplicationAt: application, configuration: NSWorkspace.OpenConfiguration())
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.openApplication(at: application, configuration: configuration) { [weak self] app, error in
+            if error == nil, app != nil {
+                NSLog("EasyRight: activated application %@", appName)
+                return
+            }
+            let detail = error?.localizedDescription ?? "系统未返回已启动的应用"
+            NSLog("EasyRight: failed to activate application %@: %@", appName, detail)
+            Task { @MainActor [weak self] in
+                self?.showError("无法打开「\(appName)」：\n\(detail)")
+            }
+        }
     }
 
     // MARK: - 错误提示

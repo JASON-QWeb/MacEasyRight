@@ -128,16 +128,18 @@ class EasyRightFinderSync: FIFinderSync, @unchecked Sendable {
     /// "进入终端 / 进入 VSCode …" 一类菜单项
     private func addAppItems(into menu: NSMenu, cfg: EasyConfig) {
         refreshAvailableAppsIfNeeded()
-        for known in kKnownApps where cfg.apps.contains(known.name) {
+        for (index, known) in kKnownApps.enumerated() where cfg.apps.contains(known.name) {
             guard cachedAvailableApps.contains(known.name) else { continue }
             let needSpace = known.name.first?.isASCII == true
             let title = needSpace ? "进入 \(known.name)" : "进入\(known.name)"
             let item = makeItem(
                 title,
                 #selector(openWithApp(_:)),
-                represented: known.name,
                 systemSymbol: "arrow.up.forward.app"
             )
+            // Finder 会跨进程重建菜单项，representedObject 不会稳定带回；
+            // tag 是 NSMenuItem 序列化的标量字段，与新建文件菜单使用同一机制。
+            item.tag = index + 1
             menu.addItem(item)
         }
     }
@@ -232,7 +234,11 @@ class EasyRightFinderSync: FIFinderSync, @unchecked Sendable {
                 NSLog("EasyRightExt: failed to encode %@ command", cmd.action.rawValue)
                 return
             }
-            NSWorkspace.shared.open(url)
+            if NSWorkspace.shared.open(url) {
+                NSLog("EasyRightExt: forwarded %@ command", cmd.action.rawValue)
+            } else {
+                NSLog("EasyRightExt: failed to open URL for %@ command", cmd.action.rawValue)
+            }
             return
         }
 
@@ -310,9 +316,13 @@ class EasyRightFinderSync: FIFinderSync, @unchecked Sendable {
     }
 
     @objc func openWithApp(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String else { return }
-        var targets = selectedPaths()
-        if targets.isEmpty, let container = containerPath() { targets = [container] }
-        send(Command(action: .open, targets: targets, app: name))
+        let index = sender.tag - 1
+        guard kKnownApps.indices.contains(index) else {
+            NSLog("EasyRightExt: invalid app menu tag %d for %@", sender.tag, sender.title)
+            return
+        }
+        let name = kKnownApps[index].name
+        NSLog("EasyRightExt: launch app menu selected: %@", name)
+        send(Command(action: .open, targets: [], app: name))
     }
 }
