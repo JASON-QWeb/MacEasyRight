@@ -19,7 +19,7 @@ swiftc -O \
     -module-name EasyRight \
     -target "$TARGET" -sdk "$SDK" \
     Sources/Shared/*.swift Sources/App/*.swift \
-    -framework AppKit -framework SwiftUI \
+    -framework AppKit -framework SwiftUI -framework FinderSync \
     -o "$APP/Contents/MacOS/EasyRight"
 
 echo "==> 编译 Finder 扩展 EasyRightExt"

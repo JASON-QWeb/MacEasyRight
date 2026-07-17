@@ -30,20 +30,87 @@ VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resourc
 ARCH=$(uname -m)
 DIST_DIR="$PWD/dist"
 DMG_PATH="$DIST_DIR/EasyRight-$VERSION-$ARCH.dmg"
-STAGING_DIR=$(mktemp -d "${TMPDIR:-/tmp}/easyright-dmg.XXXXXX")
-trap 'rm -rf "$STAGING_DIR"' EXIT
+RW_DMG_PATH="$DIST_DIR/.EasyRight-$VERSION-$ARCH.rw.dmg"
+VOLUME_NAME="EasyRight $VERSION"
+RENDER_DIR=$(mktemp -d "${TMPDIR:-/tmp}/easyright-background.XXXXXX")
+MOUNT_DIR=""
+MOUNT_DEVICE=""
+
+cleanup() {
+    if [ -n "$MOUNT_DEVICE" ]; then
+        hdiutil detach "$MOUNT_DEVICE" >/dev/null 2>&1 || true
+    fi
+    find "$RENDER_DIR" -mindepth 1 -delete >/dev/null 2>&1 || true
+    rmdir "$RENDER_DIR" >/dev/null 2>&1 || true
+    if [ -e "$RW_DMG_PATH" ]; then rm "$RW_DMG_PATH"; fi
+}
+trap cleanup EXIT
 
 mkdir -p "$DIST_DIR"
 if [ -e "$DMG_PATH" ]; then rm "$DMG_PATH"; fi
+if [ -e "$RW_DMG_PATH" ]; then rm "$RW_DMG_PATH"; fi
 
-ditto build/EasyRight.app "$STAGING_DIR/EasyRight.app"
+echo "==> 渲染 DMG 安装背景"
+BACKGROUND_PNG="$RENDER_DIR/background.png"
+sips -s format png Resources/DMGBackground.svg --out "$BACKGROUND_PNG" >/dev/null
+if [ ! -f "$BACKGROUND_PNG" ]; then
+    echo "错误:无法生成 DMG 背景图。"
+    exit 1
+fi
 
+echo "==> 创建可写 DMG"
 hdiutil create \
-    -volname "EasyRight $VERSION" \
-    -srcfolder "$STAGING_DIR" \
-    -format UDZO \
+    -size 32m \
+    -fs HFS+ \
+    -volname "$VOLUME_NAME" \
     -ov \
-    "$DMG_PATH"
+    "$RW_DMG_PATH" >/dev/null
+
+ATTACH_OUTPUT=$(hdiutil attach "$RW_DMG_PATH" -readwrite -noverify -noautoopen)
+MOUNT_DEVICE=$(awk '/Apple_HFS|Apple_APFS/ {print $1; exit}' <<< "$ATTACH_OUTPUT")
+MOUNT_DIR=$(awk '/Apple_HFS|Apple_APFS/ {print substr($0, index($0, "/Volumes/")); exit}' <<< "$ATTACH_OUTPUT")
+if [ -z "$MOUNT_DEVICE" ] || [ -z "$MOUNT_DIR" ]; then
+    echo "错误:无法挂载可写 DMG。"
+    exit 1
+fi
+
+ditto build/EasyRight.app "$MOUNT_DIR/EasyRight.app"
+ln -s /Applications "$MOUNT_DIR/Applications"
+mkdir -p "$MOUNT_DIR/.background"
+ditto "$BACKGROUND_PNG" "$MOUNT_DIR/.background/background.png"
+
+echo "==> 设置拖拽安装窗口布局"
+osascript <<APPLESCRIPT
+tell application "Finder"
+    tell disk "$VOLUME_NAME"
+        open
+        set current view of container window to icon view
+        set toolbar visible of container window to false
+        set statusbar visible of container window to false
+        set pathbar visible of container window to false
+        set bounds of container window to {100, 100, 740, 500}
+        set viewOptions to the icon view options of container window
+        set arrangement of viewOptions to not arranged
+        set icon size of viewOptions to 112
+        set text size of viewOptions to 14
+        set background picture of viewOptions to file ".background:background.png"
+        set position of item "EasyRight.app" of container window to {170, 220}
+        set position of item "Applications" of container window to {470, 220}
+        close
+    end tell
+end tell
+delay 2
+APPLESCRIPT
+
+sync
+hdiutil detach "$MOUNT_DEVICE" >/dev/null
+MOUNT_DEVICE=""
+
+echo "==> 压缩并签名 DMG"
+hdiutil convert "$RW_DMG_PATH" \
+    -format UDZO \
+    -imagekey zlib-level=9 \
+    -o "$DMG_PATH" >/dev/null
 
 codesign --force --sign "$IDENTITY" "$DMG_PATH"
 codesign --verify --verbose=2 "$DMG_PATH"

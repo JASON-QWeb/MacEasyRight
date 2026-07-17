@@ -1,4 +1,5 @@
 import AppKit
+import FinderSync
 import SwiftUI
 
 extension Notification.Name {
@@ -9,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
     private var recordMenuItem: NSMenuItem?
+    private var pendingDashboardOpen: DispatchWorkItem?
+    private var launchedForCommand = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 首次启动写入默认配置,让扩展有配置可读
@@ -25,15 +28,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Recorder.shared.onStateChange = { [weak self] in
             self?.updateRecordingUI()
         }
+
+        // 从 Finder / “应用程序”直接启动时展示 Dashboard。Finder 扩展通过 URL
+        // 唤起主应用执行命令时不弹设置窗口，避免干扰右键操作。
+        let dashboardOpen = DispatchWorkItem { [weak self] in
+            guard let self, !self.launchedForCommand else { return }
+            self.openSettings()
+        }
+        pendingDashboardOpen = dashboardOpen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: dashboardOpen)
         NSLog("EasyRight: launched")
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
+        launchedForCommand = true
+        pendingDashboardOpen?.cancel()
         for url in urls {
             if let cmd = decodeCommand(from: url) {
                 CommandHandler.shared.handle(cmd)
             }
         }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openSettings()
+        return false
     }
 
     // MARK: - 菜单栏
@@ -117,8 +136,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             let win = NSWindow(contentViewController: hosting)
             win.title = "EasyRight 设置"
-            win.styleMask = [.titled, .closable, .miniaturizable]
+            win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             win.isReleasedWhenClosed = false
+            win.setContentSize(NSSize(width: 820, height: 650))
+            win.minSize = NSSize(width: 760, height: 600)
             win.center()
             settingsWindow = win
         }
@@ -127,8 +148,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openExtensionSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.ExtensionsPreferences") {
-            NSWorkspace.shared.open(url)
-        }
+        FIFinderSyncController.showExtensionManagementInterface()
     }
 }

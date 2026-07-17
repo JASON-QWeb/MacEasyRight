@@ -1,5 +1,8 @@
 import SwiftUI
 import AppKit
+import ApplicationServices
+import CoreGraphics
+import FinderSync
 
 final class ConfigStore: ObservableObject {
     @Published var config: EasyConfig {
@@ -11,18 +14,213 @@ final class ConfigStore: ObservableObject {
     init() { config = EasyConfig.load() }
 }
 
+final class SystemStatusStore: ObservableObject {
+    @Published private(set) var finderExtensionEnabled = false
+    @Published private(set) var screenRecordingGranted = false
+    @Published private(set) var accessibilityGranted = false
+
+    init() { refresh() }
+
+    func refresh() {
+        finderExtensionEnabled = FIFinderSyncController.isExtensionEnabled
+        screenRecordingGranted = CGPreflightScreenCaptureAccess()
+        accessibilityGranted = AXIsProcessTrusted()
+    }
+
+    func openFinderExtensionSettings() {
+        FIFinderSyncController.showExtensionManagementInterface()
+        refreshAfterReturningFromSystemSettings()
+    }
+
+    func openScreenRecordingSettings() {
+        openSystemSettings("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        refreshAfterReturningFromSystemSettings()
+    }
+
+    func openAccessibilitySettings() {
+        openSystemSettings("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        refreshAfterReturningFromSystemSettings()
+    }
+
+    private func refreshAfterReturningFromSystemSettings() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refresh() }
+    }
+}
+
+private enum SettingsDestination: String, CaseIterable, Identifiable {
+    case overview
+    case rightMenu
+    case capture
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .overview:  return "概览"
+        case .rightMenu: return "右键菜单"
+        case .capture:   return "截图与录屏"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .overview:  return "square.grid.2x2"
+        case .rightMenu: return "cursorarrow.click.2"
+        case .capture:   return "camera.viewfinder"
+        }
+    }
+}
+
 struct SettingsView: View {
     @StateObject private var store = ConfigStore()
+    @StateObject private var systemStatus = SystemStatusStore()
+    @State private var destination: SettingsDestination? = .overview
 
     var body: some View {
-        TabView {
-            RightMenuSettingsTab(store: store)
-                .tabItem { Label("右键菜单", systemImage: "cursorarrow.click.2") }
-            CaptureSettingsTab(store: store)
-                .tabItem { Label("截图与录屏", systemImage: "camera.viewfinder") }
+        NavigationSplitView {
+            List(SettingsDestination.allCases, selection: $destination) { item in
+                Label(item.title, systemImage: item.symbol)
+                    .tag(Optional(item))
+            }
+            .navigationTitle("EasyRight")
+            .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 220)
+        } detail: {
+            switch destination ?? .overview {
+            case .overview:
+                OverviewDashboard(status: systemStatus)
+            case .rightMenu:
+                RightMenuSettingsTab(store: store)
+            case .capture:
+                CaptureSettingsTab(store: store)
+            }
         }
-        .frame(width: 580, height: 640)
+        .frame(minWidth: 760, minHeight: 600)
+        .onAppear { systemStatus.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            systemStatus.refresh()
+        }
     }
+}
+
+// MARK: - 概览 / 首次使用引导
+
+private struct OverviewDashboard: View {
+    @ObservedObject var status: SystemStatusStore
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                HStack(spacing: 16) {
+                    Image(nsImage: NSApplication.shared.applicationIconImage)
+                        .resizable()
+                        .frame(width: 72, height: 72)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("EasyRight")
+                            .font(.system(size: 28, weight: .bold))
+                        Text("Finder 右键增强、截图、贴图与录屏")
+                            .font(.title3)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                StatusCard(
+                    title: "Finder 右键扩展",
+                    detail: status.finderExtensionEnabled
+                        ? "扩展已启用。现在可以在 Finder 的文件、文件夹或空白处点击右键。"
+                        : "需要在系统设置中启用 EasyRight 扩展，右键菜单才会出现。",
+                    isReady: status.finderExtensionEnabled,
+                    readyText: "已启用",
+                    actionTitle: "打开 Finder 扩展设置",
+                    action: status.openFinderExtensionSettings
+                )
+
+                HStack(alignment: .top, spacing: 14) {
+                    StatusCard(
+                        title: "屏幕录制",
+                        detail: "截图、录屏和长截图需要此权限。",
+                        isReady: status.screenRecordingGranted,
+                        readyText: "已授权",
+                        actionTitle: "打开权限设置",
+                        action: status.openScreenRecordingSettings
+                    )
+                    StatusCard(
+                        title: "辅助功能",
+                        detail: "自动滚动长截图需要此权限。",
+                        isReady: status.accessibilityGranted,
+                        readyText: "已授权",
+                        actionTitle: "打开权限设置",
+                        action: status.openAccessibilitySettings
+                    )
+                }
+
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 9) {
+                        Label("安装后的首次使用", systemImage: "checklist")
+                            .font(.headline)
+                        Text("1. 启用 Finder 扩展\n2. 回到 Finder 重新点击右键\n3. 使用截图或长截图时再按系统提示授权")
+                            .foregroundColor(.secondary)
+                        if status.finderExtensionEnabled {
+                            Text("如果刚启用后菜单仍未出现，请关闭并重新打开 Finder 窗口；必要时重新启动 Finder。")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(4)
+                }
+
+                HStack {
+                    Button("重新检查状态") { status.refresh() }
+                    Button("在 Finder 中查看主目录") {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: realHomePath(), isDirectory: true))
+                    }
+                }
+            }
+            .padding(28)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct StatusCard: View {
+    let title: String
+    let detail: String
+    let isReady: Bool
+    let readyText: String
+    let actionTitle: String
+    let action: () -> Void
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Image(systemName: isReady ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                        .foregroundColor(isReady ? .green : .orange)
+                    Text(title).font(.headline)
+                    Spacer()
+                    Text(isReady ? readyText : "需要设置")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(isReady ? .green : .orange)
+                }
+                Text(detail)
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if isReady {
+                    Button(actionTitle, action: action)
+                        .buttonStyle(.bordered)
+                } else {
+                    Button(actionTitle, action: action)
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(4)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private func openSystemSettings(_ value: String) {
+    if let url = URL(string: value) { NSWorkspace.shared.open(url) }
 }
 
 // MARK: - 右键菜单设置

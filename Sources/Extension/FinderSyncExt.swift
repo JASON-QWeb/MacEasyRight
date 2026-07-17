@@ -85,7 +85,7 @@ class EasyRightFinderSync: FIFinderSync {
             addNewFileItems(into: menu, destination: selection[0].path)
         }
 
-        let copyItem = makeItem("复制文件到 ...", nil, symbol: "doc.on.doc")
+        let copyItem = makeItem("复制文件到 ...", nil)
         copyItem.submenu = folderSubmenu(
             action: #selector(copyToFolder(_:)),
             chooseAction: #selector(copyToChosen(_:)),
@@ -93,7 +93,7 @@ class EasyRightFinderSync: FIFinderSync {
         )
         menu.addItem(copyItem)
 
-        let moveItem = makeItem("移动文件到 ...", nil, symbol: "arrowshape.turn.up.right")
+        let moveItem = makeItem("移动文件到 ...", nil)
         moveItem.submenu = folderSubmenu(
             action: #selector(moveToFolder(_:)),
             chooseAction: #selector(moveToChosen(_:)),
@@ -102,27 +102,26 @@ class EasyRightFinderSync: FIFinderSync {
         menu.addItem(moveItem)
 
         if cfg.showCutPaste {
-            menu.addItem(makeItem("剪切", #selector(cutItems(_:)), symbol: "scissors"))
+            menu.addItem(makeItem("剪切", #selector(cutItems(_:))))
             // 只选中了一个文件夹且有剪切内容时,提供"粘贴到此文件夹"
             if selection.count == 1, isFolder(selection[0]), let state = CutState.load() {
                 menu.addItem(makeItem(
                     "粘贴到此文件夹(\(state.paths.count) 项)",
-                    #selector(pasteIntoSelectedFolder(_:)),
-                    symbol: "doc.on.clipboard"
+                    #selector(pasteIntoSelectedFolder(_:))
                 ))
             }
         }
 
         if cfg.showCopyPath {
-            menu.addItem(makeItem("拷贝路径", #selector(copyPath(_:)), symbol: "link"))
+            menu.addItem(makeItem("拷贝路径", #selector(copyPath(_:))))
         }
 
         if cfg.showCustomIcon {
-            let iconItem = makeItem("自定义文件(夹)图标", nil, symbol: "star")
+            let iconItem = makeItem("自定义文件(夹)图标", nil)
             let sub = NSMenu(title: "")
             sub.autoenablesItems = false
-            sub.addItem(makeItem("选择图片…", #selector(customIcon(_:)), symbol: "photo"))
-            sub.addItem(makeItem("恢复默认图标", #selector(resetIcon(_:)), symbol: "arrow.uturn.backward"))
+            sub.addItem(makeItem("选择图片…", #selector(customIcon(_:))))
+            sub.addItem(makeItem("恢复默认图标", #selector(resetIcon(_:))))
             iconItem.submenu = sub
             menu.addItem(iconItem)
         }
@@ -138,12 +137,11 @@ class EasyRightFinderSync: FIFinderSync {
         if cfg.showCutPaste, let state = CutState.load() {
             menu.addItem(makeItem(
                 "粘贴到此处(\(state.paths.count) 项)",
-                #selector(pasteHere(_:)),
-                symbol: "doc.on.clipboard"
+                #selector(pasteHere(_:))
             ))
         }
         if cfg.showCopyPath {
-            menu.addItem(makeItem("拷贝当前文件夹路径", #selector(copyContainerPath(_:)), symbol: "link"))
+            menu.addItem(makeItem("拷贝当前文件夹路径", #selector(copyContainerPath(_:))))
         }
         addAppItems(into: menu, cfg: cfg)
     }
@@ -151,13 +149,10 @@ class EasyRightFinderSync: FIFinderSync {
     /// "进入终端 / 进入 VSCode …" 一类菜单项
     private func addAppItems(into menu: NSMenu, cfg: EasyConfig) {
         for known in kKnownApps where cfg.apps.contains(known.name) {
-            guard let url = appURL(for: known) else { continue }
+            guard appURL(for: known) != nil else { continue }
             let needSpace = known.name.first?.isASCII == true
             let title = needSpace ? "进入 \(known.name)" : "进入\(known.name)"
             let item = makeItem(title, #selector(openWithApp(_:)), represented: known.name)
-            let icon = NSWorkspace.shared.icon(forFile: url.path)
-            icon.size = NSSize(width: 16, height: 16)
-            item.image = icon
             menu.addItem(item)
         }
     }
@@ -167,35 +162,33 @@ class EasyRightFinderSync: FIFinderSync {
         sub.autoenablesItems = false
         for path in cfg.folders {
             let name = (path as NSString).lastPathComponent
-            sub.addItem(makeItem(name, action, symbol: "folder", represented: path))
+            sub.addItem(makeItem(name, action, represented: path))
         }
         if !cfg.folders.isEmpty { sub.addItem(.separator()) }
-        sub.addItem(makeItem("选择其他文件夹…", chooseAction, symbol: "folder.badge.plus"))
+        sub.addItem(makeItem("选择其他文件夹…", chooseAction))
         return sub
     }
 
     private func addNewFileItems(into menu: NSMenu, destination: String) {
-        let items: [(String, String, NewFileKind)] = [
-            ("新建 TXT 文件", "doc.plaintext", .txt),
-            ("新建 Markdown 文件", "doc.text", .md),
-            ("新建 JSON 文件", "curlybraces", .json),
+        let items: [(String, NewFileKind)] = [
+            ("新建 TXT 文件", .txt),
+            ("新建 Markdown 文件", .md),
+            ("新建 JSON 文件", .json),
         ]
-        for (title, symbol, kind) in items {
+        for (title, kind) in items {
             let requestID = nextNewFileRequestID
             nextNewFileRequestID += 1
             newFileRequests[requestID] = NewFileRequest(kind: kind, destination: destination)
-            let item = makeItem(title, #selector(createFile(_:)), symbol: symbol)
+            let item = makeItem(title, #selector(createFile(_:)))
             item.tag = requestID
             menu.addItem(item)
         }
     }
 
-    private func makeItem(_ title: String, _ action: Selector?, symbol: String? = nil, represented: Any? = nil) -> NSMenuItem {
+    private func makeItem(_ title: String, _ action: Selector?, represented: Any? = nil) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        item.target = self
-        if let symbol {
-            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        }
+        // Finder 会跨 XPC 序列化此菜单，并把 action 发送给扩展 principal object。
+        // 显式设置进程内 target 会让项目在 Finder 端失去可解析的 action 目标。
         item.representedObject = represented
         return item
     }
