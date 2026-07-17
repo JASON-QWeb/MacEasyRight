@@ -31,9 +31,10 @@ echo "完成!在 Finder 里右键任意文件/文件夹即可看到菜单。"
 echo "如果菜单没出现:系统设置 → 通用 → 登录项与扩展 → Finder 扩展,勾选 EasyRight。"
 echo ""
 SIGNING_DETAILS=$(codesign -dv --verbose=4 /Applications/EasyRight.app 2>&1 || true)
-if grep -Fq "Authority=EasyRight Dev" <<< "$SIGNING_DETAILS"; then
-    echo "✅ 已使用固定自签名证书 EasyRight Dev。以后用同一证书覆盖安装时,已有 TCC 授权可保持。"
+SIGNING_AUTHORITY=$(awk -F= '/^Authority=/{print $2; exit}' <<< "$SIGNING_DETAILS")
+if [ -n "$SIGNING_AUTHORITY" ]; then
+    echo "✅ 已使用固定代码签名身份。以后用同一身份覆盖安装时,已有 TCC 授权通常可保持。"
 else
     echo "⚠️  当前使用 ad-hoc 签名。重新构建安装后,屏幕录制 / 辅助功能授权可能失效。"
-    echo "   请在登录钥匙串中创建并信任名为 EasyRight Dev 的代码签名证书。"
+    echo "   可创建并信任固定的代码签名证书,再通过 CODESIGN_IDENTITY 环境变量指定。"
 fi

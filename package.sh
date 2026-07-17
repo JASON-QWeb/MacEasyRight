@@ -1,14 +1,19 @@
 #!/bin/bash
-# 构建固定自签名版本并制作个人分发 DMG。
+# 使用本机固定签名身份构建并制作个人分发 DMG。
 set -euo pipefail
 cd "$(dirname "$0")"
 
-IDENTITY="EasyRight Dev"
-KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+IDENTITY="${CODESIGN_IDENTITY:-}"
 
-CODE_SIGNING_IDENTITIES=$(security find-identity -v -p codesigning "$KEYCHAIN" 2>/dev/null || true)
+if [ -z "$IDENTITY" ] || [ "$IDENTITY" = "-" ]; then
+    echo "错误:个人分发包必须使用固定签名身份。"
+    echo '用法:CODESIGN_IDENTITY="证书名称" ./package.sh'
+    exit 1
+fi
+
+CODE_SIGNING_IDENTITIES=$(security find-identity -v -p codesigning 2>/dev/null || true)
 if ! grep -Fq "\"$IDENTITY\"" <<< "$CODE_SIGNING_IDENTITIES"; then
-    echo "错误:登录钥匙串中没有可用的 $IDENTITY 代码签名身份。"
+    echo "错误:钥匙串中没有可用的代码签名身份: $IDENTITY"
     echo "请先创建并信任该证书,且务必保留同一份私钥用于后续版本。"
     exit 1
 fi
@@ -32,10 +37,6 @@ mkdir -p "$DIST_DIR"
 if [ -e "$DMG_PATH" ]; then rm "$DMG_PATH"; fi
 
 ditto build/EasyRight.app "$STAGING_DIR/EasyRight.app"
-ln -s /Applications "$STAGING_DIR/Applications"
-cp "Distribution/安装说明.txt" "$STAGING_DIR/安装说明.txt"
-security find-certificate -c "$IDENTITY" -p "$KEYCHAIN" \
-    | openssl x509 -outform der -out "$STAGING_DIR/EasyRight Dev.cer"
 
 hdiutil create \
     -volname "EasyRight $VERSION" \

@@ -61,15 +61,17 @@ xcode-select --install
 
 ## 个人分发打包
 
-登录钥匙串中存在并信任 `EasyRight Dev` 代码签名证书后，运行：
+在钥匙串中创建并信任固定的代码签名证书后，通过环境变量传入证书名称：
 
 ```bash
-./package.sh
+CODESIGN_IDENTITY="你的代码签名证书名称" ./package.sh
 ```
 
-脚本会拒绝 ad-hoc 签名，构建并验证主应用、Finder 扩展和 DMG，最终产物位于 `dist/`。DMG 内含应用程序快捷方式、公开签名证书和安装说明，不包含私钥。
+脚本会拒绝 ad-hoc 签名，构建并验证主应用、Finder 扩展和 DMG，最终产物位于 `dist/`。DMG 中只包含 `EasyRight.app`，不会打包证书、私钥、安装说明或其他本机文件。
 
-固定自签名可让同一台 Mac 上的后续覆盖安装维持一致代码身份，避免仅因重新构建而反复丢失 TCC 授权。但自签名不等于 Apple Developer ID：其他 Mac 首次安装仍需手动允许打开，并分别授权屏幕录制和辅助功能；面向普通用户无提示分发需要 Developer ID 签名和 Apple 公证。
+朋友首次安装时，把 `EasyRight.app` 拖到“应用程序”，尝试打开一次，然后前往“系统设置 → 隐私与安全性”点击“仍要打开”。之后还需要启用 Finder 扩展，并按需授权屏幕录制和辅助功能。
+
+固定自签名可让同一台 Mac 上的后续覆盖安装维持一致代码身份，避免仅因重新构建而反复丢失 TCC 授权。但自签名不等于 Apple Developer ID；安装 Xcode 也不会自动获得 Developer ID。自签名适合朋友间、非托管 Mac 的小范围分享，面向普通用户的无提示分发则需要 Apple Developer ID 签名和公证。
 
 ## 权限
 

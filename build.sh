@@ -1,5 +1,5 @@
 #!/bin/bash
-# EasyRight 构建脚本:编译主应用 + Finder 扩展,组装 .app 并 ad-hoc 签名
+# EasyRight 构建脚本:编译主应用 + Finder 扩展,组装 .app 并签名
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -38,12 +38,15 @@ cp Resources/App-Info.plist "$APP/Contents/Info.plist"
 cp Resources/Ext-Info.plist "$APPEX/Contents/Info.plist"
 cp Resources/EasyRight.icns "$APP/Contents/Resources/EasyRight.icns"
 
-# 有名为 "EasyRight Dev" 的自签名证书就用它(签名身份稳定,重装后 TCC 权限不失效);
-# 没有则退回 ad-hoc(每次重装后需要在系统设置里重新授权屏幕录制/辅助功能)
-IDENTITY="-"
-CODE_SIGNING_IDENTITIES=$(security find-identity -v -p codesigning 2>/dev/null || true)
-if grep -Fq '"EasyRight Dev"' <<< "$CODE_SIGNING_IDENTITIES"; then
-    IDENTITY="EasyRight Dev"
+# 默认使用 ad-hoc 签名。本机若有固定代码签名证书，可通过环境变量显式传入：
+# CODESIGN_IDENTITY="证书名称" ./build.sh
+IDENTITY="${CODESIGN_IDENTITY:--}"
+if [ "$IDENTITY" != "-" ]; then
+    CODE_SIGNING_IDENTITIES=$(security find-identity -v -p codesigning 2>/dev/null || true)
+    if ! grep -Fq "\"$IDENTITY\"" <<< "$CODE_SIGNING_IDENTITIES"; then
+        echo "错误:找不到可用的代码签名身份: $IDENTITY"
+        exit 1
+    fi
 fi
 echo "==> 签名(identity: $IDENTITY)"
 codesign --force --sign "$IDENTITY" --entitlements Resources/ext.entitlements "$APPEX"
