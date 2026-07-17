@@ -1,6 +1,6 @@
 import AppKit
 
-// MARK: - 自绘屏幕选区(用于「截图并贴图」和「长截图」)
+// MARK: - 自绘屏幕选区(用于「区域截图」「截图并贴图」和「长截图」)
 
 @MainActor
 final class RegionSelector {

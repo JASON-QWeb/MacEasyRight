@@ -1,11 +1,12 @@
 import AppKit
 
-// MARK: - 截图:区域截图(系统交互式)/ 截图并贴图(自绘选区)/ 剪贴板贴图
+// MARK: - 截图:框选区域 → 保存/复制 → 底部操作条可选择贴图
 
 @MainActor
 final class ScreenshotController {
     static let shared = ScreenshotController()
     private let fm = FileManager.default
+    private var actionPanel: CaptureActionPanel?
 
     // MARK: 权限预检:重新安装(签名变化)后旧授权会静默失效,这里显式检测
 
@@ -22,29 +23,21 @@ final class ScreenshotController {
         return false
     }
 
-    // MARK: 区域截图(系统原生十字选框,支持按空格切换窗口模式)
+    // MARK: 区域截图
 
     func captureInteractive() {
-        guard ensureScreenPermission(kind: "截图") else { return }
-        let tmp = tmpPath()
-        runScreencapture(["-i", "-x", tmp]) { [self] launchError in
-            if let launchError {
-                showCaptureError("无法启动系统截图工具", detail: launchError.localizedDescription)
-                return
-            }
-            guard fm.fileExists(atPath: tmp), let image = NSImage(contentsOfFile: tmp) else {
-                NSLog("EasyRight: interactive capture cancelled or failed")
-                removeTemporaryCapture(at: tmp)
-                return
-            }
-            finish(image: image, tmpFile: tmp, prefix: "截图", pinRect: nil, forcePin: false)
-        }
+        startRegionCapture(pinImmediately: false)
     }
 
-    // MARK: 截图并贴图(自绘选区 → 精确捕获 → 原位浮起)
+    // MARK: 兼容入口：截图后直接贴图
 
     func captureAndPin() {
+        startRegionCapture(pinImmediately: true)
+    }
+
+    private func startRegionCapture(pinImmediately: Bool) {
         guard ensureScreenPermission(kind: "截图") else { return }
+        dismissActionPanel()
         RegionSelector.select { [self] nsRect in
             guard let nsRect else { return }
             let cg = cocoaToCG(nsRect)
@@ -67,7 +60,16 @@ final class ScreenshotController {
                         }
                         return
                     }
-                    self.finish(image: image, tmpFile: tmp, prefix: "截图", pinRect: nsRect, forcePin: true)
+                    self.finish(
+                        image: image,
+                        tmpFile: tmp,
+                        prefix: "截图",
+                        pinRect: nsRect,
+                        pinImmediately: pinImmediately
+                    )
+                    if !pinImmediately {
+                        self.showCaptureActions(image: image, rect: nsRect)
+                    }
                 }
             }
         }
@@ -84,11 +86,16 @@ final class ScreenshotController {
         PinManager.shared.pin(image: image, at: nil)
     }
 
-    // MARK: 通用收尾:按配置 复制 / 保存 / 贴图
+    // MARK: 通用收尾:按配置复制/保存；只有明确点击或兼容指令才贴图
 
-    func finish(image: NSImage, tmpFile: String?, prefix: String, pinRect: NSRect?, forcePin: Bool) {
+    func finish(
+        image: NSImage,
+        tmpFile: String?,
+        prefix: String,
+        pinRect: NSRect?,
+        pinImmediately: Bool
+    ) {
         let cfg = EasyConfig.load()
-        let pin = forcePin || cfg.pinAfterCapture
         if cfg.copyAfterCapture {
             let pb = NSPasteboard.general
             pb.clearContents()
@@ -122,10 +129,34 @@ final class ScreenshotController {
                 NSLog("EasyRight: failed to remove capture temp file: %@", error.localizedDescription)
             }
         }
-        if pin {
+        if pinImmediately {
             PinManager.shared.pin(image: image, at: pinRect)
         }
-        NSLog("EasyRight: capture finished %.0fx%.0f pin=%d", image.size.width, image.size.height, pin ? 1 : 0)
+        NSLog(
+            "EasyRight: capture finished %.0fx%.0f pin=%d",
+            image.size.width,
+            image.size.height,
+            pinImmediately ? 1 : 0
+        )
+    }
+
+    private func showCaptureActions(image: NSImage, rect: NSRect) {
+        dismissActionPanel()
+        actionPanel = CaptureActionPanel(
+            rect: rect,
+            onPin: { [weak self] in
+                PinManager.shared.pin(image: image, at: rect)
+                self?.actionPanel = nil
+            },
+            onDismiss: { [weak self] in
+                self?.actionPanel = nil
+            }
+        )
+    }
+
+    private func dismissActionPanel() {
+        actionPanel?.close()
+        actionPanel = nil
     }
 
     // MARK: 工具
@@ -211,5 +242,77 @@ final class ScreenshotController {
            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(url)
         }
+    }
+}
+
+// MARK: - 截图完成操作条
+
+@MainActor
+private final class CaptureActionPanel: NSObject {
+    private let panel = FloatingHUDPanel()
+    private let onPin: () -> Void
+    private let onDismiss: () -> Void
+    private var timer: Timer?
+    private var finished = false
+
+    init(rect: NSRect, onPin: @escaping () -> Void, onDismiss: @escaping () -> Void) {
+        self.onPin = onPin
+        self.onDismiss = onDismiss
+        super.init()
+
+        let label = NSTextField(labelWithString: "截图完成")
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+
+        let pinButton = NSButton(title: "贴图", target: self, action: #selector(pinClicked))
+        pinButton.image = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "贴图")
+        pinButton.imagePosition = .imageLeading
+        pinButton.bezelStyle = .rounded
+        pinButton.keyEquivalent = "\r"
+
+        let doneButton = NSButton(title: "完成", target: self, action: #selector(doneClicked))
+        doneButton.bezelStyle = .rounded
+
+        let stack = NSStackView(views: [label, pinButton, doneButton])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 9, left: 12, bottom: 9, right: 12)
+        panel.setHUDContent(stack)
+        panel.position(relativeTo: rect, placement: .belowOrAbove)
+        panel.orderFrontRegardless()
+
+        timer = Timer.scheduledTimer(
+            timeInterval: 10,
+            target: self,
+            selector: #selector(timeoutFired),
+            userInfo: nil,
+            repeats: false
+        )
+    }
+
+    func close() {
+        guard !finished else { return }
+        finished = true
+        timer?.invalidate()
+        timer = nil
+        panel.orderOut(nil)
+    }
+
+    @objc private func pinClicked() {
+        close()
+        onPin()
+    }
+
+    @objc private func doneClicked() {
+        finishDismissal()
+    }
+
+    @objc private func timeoutFired() {
+        finishDismissal()
+    }
+
+    private func finishDismissal() {
+        close()
+        onDismiss()
     }
 }

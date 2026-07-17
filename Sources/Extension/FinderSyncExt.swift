@@ -50,11 +50,22 @@ class EasyRightFinderSync: FIFinderSync, @unchecked Sendable {
     /// 右键选中了文件/文件夹时的菜单
     private func buildItemsMenu(into menu: NSMenu, cfg: EasyConfig) {
         let selection = FIFinderSyncController.default().selectedItemURLs() ?? []
+
+        // 常用入口固定在最前：拷贝路径 → 新建内容 → 进入 App。
+        if cfg.showCopyPath {
+            menu.addItem(makeItem(
+                "拷贝路径",
+                #selector(copyPath(_:)),
+                systemSymbol: "link"
+            ))
+        }
         if cfg.showNewFile, selection.count == 1, isFolder(selection[0]) {
             addNewFileItems(into: menu, destination: selection[0].path)
         }
+        addAppItems(into: menu, cfg: cfg)
+        if menu.numberOfItems > 0 { menu.addItem(.separator()) }
 
-        let copyItem = makeItem("复制文件到 ...", nil)
+        let copyItem = makeItem("复制文件到 ...", nil, systemSymbol: "doc.on.doc")
         copyItem.submenu = folderSubmenu(
             action: #selector(copyToFolder(_:)),
             chooseAction: #selector(copyToChosen(_:)),
@@ -81,10 +92,6 @@ class EasyRightFinderSync: FIFinderSync, @unchecked Sendable {
             }
         }
 
-        if cfg.showCopyPath {
-            menu.addItem(makeItem("拷贝路径", #selector(copyPath(_:))))
-        }
-
         if cfg.showCustomIcon {
             let iconItem = makeItem("自定义文件(夹)图标", nil)
             let sub = NSMenu(title: "")
@@ -94,25 +101,28 @@ class EasyRightFinderSync: FIFinderSync, @unchecked Sendable {
             iconItem.submenu = sub
             menu.addItem(iconItem)
         }
-
-        addAppItems(into: menu, cfg: cfg)
     }
 
     /// 右键窗口空白处(当前文件夹背景)时的菜单
     private func buildContainerMenu(into menu: NSMenu, cfg: EasyConfig) {
+        if cfg.showCopyPath {
+            menu.addItem(makeItem(
+                "拷贝当前文件夹路径",
+                #selector(copyContainerPath(_:)),
+                systemSymbol: "link"
+            ))
+        }
         if cfg.showNewFile, let destination = containerPath() {
             addNewFileItems(into: menu, destination: destination)
         }
+        addAppItems(into: menu, cfg: cfg)
         if cfg.showCutPaste, let state = CutState.load() {
+            if menu.numberOfItems > 0 { menu.addItem(.separator()) }
             menu.addItem(makeItem(
                 "粘贴到此处(\(state.paths.count) 项)",
                 #selector(pasteHere(_:))
             ))
         }
-        if cfg.showCopyPath {
-            menu.addItem(makeItem("拷贝当前文件夹路径", #selector(copyContainerPath(_:))))
-        }
-        addAppItems(into: menu, cfg: cfg)
     }
 
     /// "进入终端 / 进入 VSCode …" 一类菜单项
@@ -122,7 +132,12 @@ class EasyRightFinderSync: FIFinderSync, @unchecked Sendable {
             guard cachedAvailableApps.contains(known.name) else { continue }
             let needSpace = known.name.first?.isASCII == true
             let title = needSpace ? "进入 \(known.name)" : "进入\(known.name)"
-            let item = makeItem(title, #selector(openWithApp(_:)), represented: known.name)
+            let item = makeItem(
+                title,
+                #selector(openWithApp(_:)),
+                represented: known.name,
+                systemSymbol: "arrow.up.forward.app"
+            )
             menu.addItem(item)
         }
     }
@@ -165,17 +180,32 @@ class EasyRightFinderSync: FIFinderSync, @unchecked Sendable {
             let requestID = nextNewFileRequestID
             nextNewFileRequestID += 1
             newFileRequests[requestID] = NewFileRequest(kind: kind, destination: destination)
-            let item = makeItem(title, #selector(createFile(_:)))
+            let item = makeItem(
+                title,
+                #selector(createFile(_:)),
+                systemSymbol: "doc.badge.plus"
+            )
             item.tag = requestID
             menu.addItem(item)
         }
     }
 
-    private func makeItem(_ title: String, _ action: Selector?, represented: Any? = nil) -> NSMenuItem {
+    private func makeItem(
+        _ title: String,
+        _ action: Selector?,
+        represented: Any? = nil,
+        systemSymbol: String? = nil
+    ) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         // Finder 会跨 XPC 序列化此菜单，并把 action 发送给扩展 principal object。
         // 显式设置进程内 target 会让项目在 Finder 端失去可解析的 action 目标。
         item.representedObject = represented
+        if let systemSymbol {
+            item.image = NSImage(
+                systemSymbolName: systemSymbol,
+                accessibilityDescription: title
+            )
+        }
         return item
     }
 

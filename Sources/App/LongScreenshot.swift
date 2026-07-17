@@ -290,7 +290,13 @@ final class LongScreenshot: @unchecked Sendable {
             return
         }
         let nsImage = NSImage(cgImage: image, size: .zero)
-        ScreenshotController.shared.finish(image: nsImage, tmpFile: nil, prefix: "长截图", pinRect: nil, forcePin: false)
+        ScreenshotController.shared.finish(
+            image: nsImage,
+            tmpFile: nil,
+            prefix: "长截图",
+            pinRect: nil,
+            pinImmediately: false
+        )
         let cfg = EasyConfig.load()
         if cfg.saveAfterCapture {
             NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: cfg.saveDir)

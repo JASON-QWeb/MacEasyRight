@@ -5,29 +5,23 @@ import Carbon.HIToolbox
 
 enum HotkeyAction: String, CaseIterable {
     case capture
-    case capturePin
-    case pinClipboard
-    case record
     case longshot
+    case record
 
     var label: String {
         switch self {
-        case .capture:      return "区域截图"
-        case .capturePin:   return "截图并贴图"
-        case .pinClipboard: return "贴图(剪贴板图片)"
-        case .record:       return "开始 / 停止录屏"
-        case .longshot:     return "长截图(自动滚动)"
+        case .capture:  return "区域截图"
+        case .longshot: return "长截图(自动滚动)"
+        case .record:   return "开始 / 停止录屏"
         }
     }
 
     @MainActor
     func perform() {
         switch self {
-        case .capture:      ScreenshotController.shared.captureInteractive()
-        case .capturePin:   ScreenshotController.shared.captureAndPin()
-        case .pinClipboard: ScreenshotController.shared.pinFromClipboard()
-        case .record:       Recorder.shared.toggle()
-        case .longshot:     LongScreenshot.shared.start()
+        case .capture:  ScreenshotController.shared.captureInteractive()
+        case .longshot: LongScreenshot.shared.start()
+        case .record:   Recorder.shared.toggle()
         }
     }
 }

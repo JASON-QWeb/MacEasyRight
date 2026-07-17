@@ -50,29 +50,37 @@ final class ConfigStore: ObservableObject, @unchecked Sendable {
     func clearSaveError() { saveError = nil }
 }
 
-final class SystemStatusStore: ObservableObject {
+final class SystemStatusStore: ObservableObject, @unchecked Sendable {
     @Published private(set) var finderExtensionEnabled = false
+    @Published private(set) var finderExtensionNeedsRepair = false
+    @Published private(set) var finderExtensionDetail = "正在读取 Finder 扩展状态…"
     @Published private(set) var screenRecordingGranted = false
     @Published private(set) var screenRecordingRequiresRestart = false
     @Published private(set) var accessibilityGranted = false
     @Published private(set) var isChecking = false
 
     private var pendingRefreshes: [DispatchWorkItem] = []
+    private var finderCheckTask: Task<Void, Never>?
     private var checkGeneration = 0
     private var screenPermissionAcceptedInCurrentProcess = false
+    private var finderRepairError: String?
 
     init() { refresh() }
 
-    deinit { pendingRefreshes.forEach { $0.cancel() } }
+    deinit {
+        pendingRefreshes.forEach { $0.cancel() }
+        finderCheckTask?.cancel()
+    }
 
     func refresh() {
-        // 这里只使用 Apple 提供的当前进程公开状态 API，不读取 TCC 数据库，
-        // 也不把“设置页中有一条记录”误认为权限已对当前进程生效。
+        // Finder Sync 的公开布尔 API 在重复注册时会误报，先作为回退值，
+        // 再异步读取 PlugInKit 的具体路径和用户选择状态。
         let finderEnabled = FIFinderSyncController.isExtensionEnabled
         let screenGranted = CGPreflightScreenCaptureAccess()
         let axGranted = AXIsProcessTrusted()
 
         finderExtensionEnabled = finderEnabled
+        refreshFinderExtensionStatus(fallbackEnabled: finderEnabled)
         screenRecordingGranted = screenGranted
         accessibilityGranted = axGranted
         if screenGranted {
@@ -85,12 +93,10 @@ final class SystemStatusStore: ObservableObject {
     }
 
     func checkNow() {
-        // 手动查询以同步 API 为主，只做四次短促复查，覆盖 Finder 状态传播延迟。
         startRefreshBurst(delays: [0, 0.35, 1, 2])
     }
 
     func checkAfterReturningToApp() {
-        // 从系统设置回来时可能有短暂缓存，使用有限次数的递增间隔复查。
         startRefreshBurst(delays: [0, 0.5, 1.5, 3])
     }
 
@@ -98,12 +104,20 @@ final class SystemStatusStore: ObservableObject {
         checkGeneration &+= 1
         pendingRefreshes.forEach { $0.cancel() }
         pendingRefreshes.removeAll()
+        finderCheckTask?.cancel()
+        finderCheckTask = nil
         isChecking = false
     }
 
-    func requestFinderExtensionEnable() {
-        // Finder Sync 没有允许第三方应用静默启用扩展的公开 API。
-        // 这个系统界面是 macOS 官方提供的授权入口。
+    func performFinderExtensionAction() {
+        if finderExtensionNeedsRepair {
+            repairFinderExtension()
+            return
+        }
+        openFinderExtensionSettings()
+    }
+
+    func openFinderExtensionSettings() {
         FIFinderSyncController.showExtensionManagementInterface()
         checkAfterPermissionAction()
     }
@@ -131,8 +145,6 @@ final class SystemStatusStore: ObservableObject {
 
         let promptKey = "AXTrustedCheckOptionPrompt"
         let options = [promptKey: true] as CFDictionary
-        // 系统提示是异步的，这个调用的返回值只代表弹窗出现前的状态。
-        // 状态由 AXIsProcessTrusted 的实时轮询更新。
         _ = AXIsProcessTrustedWithOptions(options)
         refresh()
         checkAfterPermissionAction()
@@ -146,8 +158,78 @@ final class SystemStatusStore: ObservableObject {
         openSystemSettings("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
     }
 
+    private func refreshFinderExtensionStatus(fallbackEnabled: Bool) {
+        finderCheckTask?.cancel()
+        finderCheckTask = Task { [weak self] in
+            let status = await FinderExtensionManager.status()
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                self?.applyFinderExtensionStatus(status, fallbackEnabled: fallbackEnabled)
+            }
+        }
+    }
+
+    @MainActor
+    private func applyFinderExtensionStatus(
+        _ status: FinderExtensionStatus,
+        fallbackEnabled: Bool
+    ) {
+        if status.isRunningFromDiskImage {
+            finderExtensionEnabled = false
+            finderExtensionNeedsRepair = false
+            finderExtensionDetail = "当前正在从 DMG 中运行。请先把 EasyRight 拖到“应用程序”，再从应用程序目录打开。"
+        } else if let queryError = status.queryError, !queryError.isEmpty {
+            finderExtensionEnabled = fallbackEnabled
+            finderExtensionNeedsRepair = false
+            finderExtensionDetail = fallbackEnabled
+                ? "扩展已启用，但详细状态读取失败：\(queryError)"
+                : "无法读取 Finder 扩展状态：\(queryError)"
+        } else if !status.duplicatePaths.isEmpty {
+            finderExtensionEnabled = false
+            finderExtensionNeedsRepair = status.isInstalledLocation
+            finderExtensionDetail = "检测到 DMG 与已安装应用的重复扩展注册，Finder 无法稳定加载。点击“修复并重载 Finder”。"
+        } else if status.currentRegistration == nil {
+            finderExtensionEnabled = false
+            finderExtensionNeedsRepair = status.isInstalledLocation
+            finderExtensionDetail = status.isInstalledLocation
+                ? "没有找到当前安装位置的扩展注册。点击“修复并重载 Finder”。"
+                : "当前构建不在标准应用程序目录中，Finder 扩展不会作为正式安装版本加载。"
+        } else {
+            finderExtensionEnabled = status.isHealthy
+            finderExtensionNeedsRepair = false
+            finderExtensionDetail = status.isHealthy
+                ? "扩展已启用，并且只注册了“应用程序”目录中的有效实例。"
+                : "扩展已正确注册，但尚未在系统扩展管理界面启用。"
+        }
+
+        if let finderRepairError {
+            finderExtensionDetail += "\n修复提示：\(finderRepairError)"
+        }
+    }
+
+    private func repairFinderExtension() {
+        finderRepairError = nil
+        isChecking = true
+        finderExtensionDetail = "正在清理重复注册并重载 Finder…"
+        finderCheckTask?.cancel()
+        finderCheckTask = Task { [weak self] in
+            let result = await FinderExtensionManager.repairIfNeeded(reloadFinder: true)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.finderRepairError = result.errors.isEmpty
+                    ? nil
+                    : result.errors.joined(separator: "；")
+                self.applyFinderExtensionStatus(
+                    result.status,
+                    fallbackEnabled: FIFinderSyncController.isExtensionEnabled
+                )
+                self.isChecking = false
+            }
+        }
+    }
+
     private func checkAfterPermissionAction() {
-        // 授权弹窗和 Finder 管理界面是异步的。最多检查六次，10 秒后停止。
         startRefreshBurst(delays: [0, 0.5, 1.5, 3, 6, 10])
     }
 
@@ -229,6 +311,12 @@ struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             systemStatus.checkAfterReturningToApp()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .finderExtensionRegistrationChanged)) { note in
+            if let errors = note.userInfo?["errors"] as? [String], !errors.isEmpty {
+                NSLog("EasyRight: Finder repair completed with %d warning(s)", errors.count)
+            }
+            systemStatus.checkNow()
+        }
         .alert(
             "保存设置失败",
             isPresented: Binding(
@@ -309,14 +397,16 @@ private struct OverviewDashboard: View {
 
                 StatusCard(
                     title: "Finder 右键扩展",
-                    detail: status.finderExtensionEnabled
-                        ? "扩展已启用。现在可以在 Finder 的文件、文件夹或空白处点击右键。"
-                        : "macOS 不允许应用自行勾选扩展。点击下方按钮，在官方扩展管理界面启用 EasyRight。",
+                    detail: status.finderExtensionDetail,
                     isReady: status.finderExtensionEnabled,
                     readyText: "已启用",
-                    notReadyText: "未启用",
-                    actionTitle: status.finderExtensionEnabled ? "管理 Finder 扩展" : "启用 Finder 扩展",
-                    action: status.requestFinderExtensionEnable
+                    notReadyText: status.finderExtensionNeedsRepair ? "需要修复" : "未启用",
+                    actionTitle: status.finderExtensionNeedsRepair
+                        ? "修复并重载 Finder"
+                        : status.finderExtensionEnabled ? "管理 Finder 扩展" : "启用 Finder 扩展",
+                    action: status.performFinderExtensionAction,
+                    secondaryActionTitle: status.finderExtensionNeedsRepair ? "打开扩展管理" : nil,
+                    secondaryAction: status.finderExtensionNeedsRepair ? status.openFinderExtensionSettings : nil
                 )
 
                 HStack(alignment: .top, spacing: 14) {
@@ -383,9 +473,6 @@ private struct OverviewDashboard: View {
                         NSWorkspace.shared.open(URL(fileURLWithPath: realHomePath(), isDirectory: true))
                     }
                     Spacer()
-                    Text("按需检查，不在后台持续轮询")
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
                 }
             }
             .padding(28)
@@ -578,7 +665,6 @@ struct CaptureSettingsTab: View {
             }
 
             Section("截图后") {
-                Toggle("打开贴图窗口(可标注、另存为)", isOn: $store.config.pinAfterCapture)
                 Toggle("复制到剪贴板", isOn: $store.config.copyAfterCapture)
                 Toggle("保存图片文件", isOn: $store.config.saveAfterCapture)
                 HStack {
@@ -608,6 +694,7 @@ struct CaptureSettingsTab: View {
             Section("使用说明") {
                 Text("""
                 • 首次截图 / 录屏时,系统会请求「屏幕录制」权限;重新安装应用后需要移除并重新添加授权。
+                • 截图:框选后在选区下方点击「贴图」即可把图片固定在屏幕上，贴图会一直保留到手动关闭。
                 • 录屏:快捷键 → 框选范围(可拖动 / 拖手柄调整)→ 选帧率 / 格式 → 开始;再按快捷键或点「停止」结束,控制条和红框不会被录进去。
                 • 长截图:框选并调整范围 → 点「开始」→ 自动滚动或自己滚动页面,应用持续监控拼接 → 点「停止并保存」。
                 • 贴图:鼠标移入出现工具栏,可画笔 / 直线 / 箭头 / 矩形 / 文字标注,⌘Z 撤销;拖动移动、滚轮缩放、双击原始大小;⌫ 或 Esc 直接删除贴图。

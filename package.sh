@@ -1,27 +1,27 @@
 #!/bin/bash
-# 使用本机固定签名身份构建并制作个人分发 DMG。
+# 构建并制作个人分发 DMG，默认使用 ad-hoc 签名。
 set -euo pipefail
 cd "$(dirname "$0")"
 
-IDENTITY="${CODESIGN_IDENTITY:-}"
+IDENTITY="${CODESIGN_IDENTITY:--}"
 
-if [ -z "$IDENTITY" ] || [ "$IDENTITY" = "-" ]; then
-    echo "错误:个人分发包必须使用固定签名身份。"
-    echo '用法:CODESIGN_IDENTITY="证书名称" ./package.sh'
-    exit 1
+if [ "$IDENTITY" != "-" ]; then
+    CODE_SIGNING_IDENTITIES=$(security find-identity -v -p codesigning 2>/dev/null || true)
+    if ! grep -Fq "\"$IDENTITY\"" <<< "$CODE_SIGNING_IDENTITIES"; then
+        echo "错误:钥匙串中没有可用的代码签名身份: $IDENTITY"
+        exit 1
+    fi
 fi
 
-CODE_SIGNING_IDENTITIES=$(security find-identity -v -p codesigning 2>/dev/null || true)
-if ! grep -Fq "\"$IDENTITY\"" <<< "$CODE_SIGNING_IDENTITIES"; then
-    echo "错误:钥匙串中没有可用的代码签名身份: $IDENTITY"
-    echo "请先创建并信任该证书,且务必保留同一份私钥用于后续版本。"
-    exit 1
-fi
-
-./build.sh
+CODESIGN_IDENTITY="$IDENTITY" ./build.sh
 
 SIGNING_DETAILS=$(codesign -dv --verbose=4 build/EasyRight.app 2>&1 || true)
-if ! grep -Fq "Authority=$IDENTITY" <<< "$SIGNING_DETAILS"; then
+if [ "$IDENTITY" = "-" ]; then
+    if ! grep -Fq "Signature=adhoc" <<< "$SIGNING_DETAILS"; then
+        echo "错误:应用没有使用 ad-hoc 签名,停止打包。"
+        exit 1
+    fi
+elif ! grep -Fq "Authority=$IDENTITY" <<< "$SIGNING_DETAILS"; then
     echo "错误:应用没有使用 $IDENTITY 签名,停止打包。"
     exit 1
 fi

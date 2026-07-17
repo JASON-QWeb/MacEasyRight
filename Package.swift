@@ -17,6 +17,7 @@ let package = Package(
                 "AppDelegate.swift",
                 "CommandHandler.swift",
                 "FloatingHUDPanel.swift",
+                "FinderExtensionManager.swift",
                 "HotkeyManager.swift",
                 "KeyNames.swift",
                 "LongScreenshot.swift",

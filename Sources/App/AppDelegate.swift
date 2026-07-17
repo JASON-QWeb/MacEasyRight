@@ -5,6 +5,7 @@ import SwiftUI
 extension Notification.Name {
     static let easyConfigChanged = Notification.Name("EasyConfigChanged")
     static let hotkeyRegistrationFailed = Notification.Name("HotkeyRegistrationFailed")
+    static let finderExtensionRegistrationChanged = Notification.Name("FinderExtensionRegistrationChanged")
 }
 
 @MainActor
@@ -31,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         setupStatusItem()
         _ = HotkeyManager.shared.reload(config: EasyConfig.load())
+        repairFinderExtensionRegistrationIfNeeded()
 
         NotificationCenter.default.addObserver(
             self,
@@ -108,8 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         _ = add("区域截图", #selector(actCapture), hotkeyKey: "capture", symbol: "camera.viewfinder")
-        _ = add("截图并贴图", #selector(actCapturePin), hotkeyKey: "capturePin", symbol: "pin")
-        _ = add("贴图(剪贴板图片)", #selector(actPinClipboard), hotkeyKey: "pinClipboard", symbol: "doc.on.clipboard")
+        _ = add("贴图(剪贴板图片)", #selector(actPinClipboard), symbol: "doc.on.clipboard")
         _ = add("长截图", #selector(actLongshot), hotkeyKey: "longshot", symbol: "arrow.down.doc")
         recordMenuItem = add(Recorder.shared.isRecording ? "停止录屏" : "开始录屏",
                              #selector(actToggleRecord), hotkeyKey: "record", symbol: "record.circle")
@@ -163,10 +164,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.runModal()
     }
 
+    private func repairFinderExtensionRegistrationIfNeeded() {
+        Task {
+            let result = await FinderExtensionManager.repairIfNeeded(reloadFinder: true)
+            if result.changed {
+                NSLog("EasyRight: repaired Finder extension registration")
+            }
+            for error in result.errors {
+                NSLog("EasyRight: Finder extension repair warning: %@", error)
+            }
+            NotificationCenter.default.post(
+                name: .finderExtensionRegistrationChanged,
+                object: nil,
+                userInfo: result.errors.isEmpty ? nil : ["errors": result.errors]
+            )
+        }
+    }
+
     // MARK: - 动作
 
     @objc private func actCapture() { ScreenshotController.shared.captureInteractive() }
-    @objc private func actCapturePin() { ScreenshotController.shared.captureAndPin() }
     @objc private func actPinClipboard() { ScreenshotController.shared.pinFromClipboard() }
     @objc private func actLongshot() { LongScreenshot.shared.start() }
     @objc private func actToggleRecord() { Recorder.shared.toggle() }

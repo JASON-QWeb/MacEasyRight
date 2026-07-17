@@ -83,21 +83,38 @@ public struct EasyConfig: Codable, Equatable, Sendable {
     public var saveDir: String
     public var copyAfterCapture: Bool
     public var saveAfterCapture: Bool
-    public var pinAfterCapture: Bool
     public var recordFPS: Int
     public var recordFormat: String // "mp4" / "mov"
     public var hotkeys: [String: HotkeyConfig]
 
     public static func defaultHotkeys() -> [String: HotkeyConfig] {
-        // ⌃⇧ 前缀,避免和系统/常用 App 冲突;A=0 D=2 V=9 R=15 L=37
-        let cs: UInt32 = 4096 | 512
+        // Command + 数字：1=截图、2=长截图、3=录屏。
+        let command: UInt32 = 256
         return [
-            "capture":      HotkeyConfig(keyCode: 0, modifiers: cs),
-            "capturePin":   HotkeyConfig(keyCode: 2, modifiers: cs),
-            "pinClipboard": HotkeyConfig(keyCode: 9, modifiers: cs),
-            "record":       HotkeyConfig(keyCode: 15, modifiers: cs),
-            "longshot":     HotkeyConfig(keyCode: 37, modifiers: cs),
+            "capture":  HotkeyConfig(keyCode: 18, modifiers: command),
+            "longshot": HotkeyConfig(keyCode: 19, modifiers: command),
+            "record":   HotkeyConfig(keyCode: 20, modifiers: command),
         ]
+    }
+
+    /// 升级时只迁移仍等于旧默认值的按键，保留用户自行修改或清除的设置。
+    public static func normalizedHotkeys(_ hotkeys: [String: HotkeyConfig]) -> [String: HotkeyConfig] {
+        let legacyModifiers: UInt32 = 4096 | 512
+        let legacyDefaults: [String: HotkeyConfig] = [
+            "capture":      HotkeyConfig(keyCode: 0, modifiers: legacyModifiers),
+            "capturePin":   HotkeyConfig(keyCode: 2, modifiers: legacyModifiers),
+            "pinClipboard": HotkeyConfig(keyCode: 9, modifiers: legacyModifiers),
+            "record":       HotkeyConfig(keyCode: 15, modifiers: legacyModifiers),
+            "longshot":     HotkeyConfig(keyCode: 37, modifiers: legacyModifiers),
+        ]
+        let defaults = defaultHotkeys()
+        var result = hotkeys
+        result.removeValue(forKey: "capturePin")
+        result.removeValue(forKey: "pinClipboard")
+        for key in ["capture", "longshot", "record"] where result[key] == legacyDefaults[key] {
+            result[key] = defaults[key]
+        }
+        return result
     }
 
     public static func defaultConfig() -> EasyConfig {
@@ -112,7 +129,6 @@ public struct EasyConfig: Codable, Equatable, Sendable {
             saveDir: home + "/Pictures/EasyRight",
             copyAfterCapture: true,
             saveAfterCapture: true,
-            pinAfterCapture: true,
             recordFPS: 30,
             recordFormat: "mp4",
             hotkeys: defaultHotkeys()
@@ -133,7 +149,6 @@ public struct EasyConfig: Codable, Equatable, Sendable {
             var saveDir: String?
             var copyAfterCapture: Bool?
             var saveAfterCapture: Bool?
-            var pinAfterCapture: Bool?
             var recordFPS: Int?
             var recordFormat: String?
             var hotkeys: [String: HotkeyConfig]?
@@ -156,10 +171,9 @@ public struct EasyConfig: Codable, Equatable, Sendable {
             saveDir: raw.saveDir ?? d.saveDir,
             copyAfterCapture: raw.copyAfterCapture ?? true,
             saveAfterCapture: raw.saveAfterCapture ?? true,
-            pinAfterCapture: raw.pinAfterCapture ?? true,
             recordFPS: raw.recordFPS ?? 30,
             recordFormat: raw.recordFormat ?? "mp4",
-            hotkeys: raw.hotkeys ?? d.hotkeys
+            hotkeys: normalizedHotkeys(raw.hotkeys ?? d.hotkeys)
         )
     }
 
