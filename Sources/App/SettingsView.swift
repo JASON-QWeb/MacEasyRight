@@ -68,6 +68,7 @@ struct RightMenuSettingsTab: View {
             }
 
             Section("其他菜单项") {
+                Toggle("快捷新建 TXT / MD / JSON", isOn: $store.config.showNewFile)
                 Toggle("拷贝路径", isOn: $store.config.showCopyPath)
                 Toggle("剪切 / 粘贴", isOn: $store.config.showCutPaste)
                 Toggle("自定义文件(夹)图标", isOn: $store.config.showCustomIcon)

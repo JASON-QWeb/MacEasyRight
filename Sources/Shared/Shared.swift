@@ -64,6 +64,7 @@ public struct HotkeyConfig: Codable, Equatable {
 public struct EasyConfig: Codable {
     public var folders: [String]
     public var apps: [String]
+    public var showNewFile: Bool
     public var showCopyPath: Bool
     public var showCutPaste: Bool
     public var showCustomIcon: Bool
@@ -92,6 +93,7 @@ public struct EasyConfig: Codable {
         return EasyConfig(
             folders: [home + "/Desktop", home + "/Downloads", home + "/Documents"],
             apps: kKnownApps.map { $0.name },
+            showNewFile: true,
             showCopyPath: true,
             showCutPaste: true,
             showCustomIcon: true,
@@ -112,6 +114,7 @@ public struct EasyConfig: Codable {
         struct Raw: Codable {
             var folders: [String]?
             var apps: [String]?
+            var showNewFile: Bool?
             var showCopyPath: Bool?
             var showCutPaste: Bool?
             var showCustomIcon: Bool?
@@ -130,6 +133,7 @@ public struct EasyConfig: Codable {
         return EasyConfig(
             folders: raw.folders ?? d.folders,
             apps: raw.apps ?? d.apps,
+            showNewFile: raw.showNewFile ?? true,
             showCopyPath: raw.showCopyPath ?? true,
             showCutPaste: raw.showCutPaste ?? true,
             showCustomIcon: raw.showCustomIcon ?? true,
@@ -181,17 +185,46 @@ public struct CutState: Codable {
 
 // MARK: - 扩展 → 主应用 的指令(经 easyright:// URL 传递)
 
+public enum NewFileKind: String, Codable, CaseIterable {
+    case txt
+    case md
+    case json
+
+    public var defaultFileName: String {
+        switch self {
+        case .txt:  return "未命名.txt"
+        case .md:   return "未命名.md"
+        case .json: return "未命名.json"
+        }
+    }
+
+    public var initialContents: String {
+        switch self {
+        case .txt, .md: return ""
+        case .json:     return "{}\n"
+        }
+    }
+}
+
 public struct Command: Codable {
     public var action: String
     public var targets: [String]
     public var dest: String?
     public var app: String?
+    public var fileKind: NewFileKind?
 
-    public init(action: String, targets: [String], dest: String? = nil, app: String? = nil) {
+    public init(
+        action: String,
+        targets: [String],
+        dest: String? = nil,
+        app: String? = nil,
+        fileKind: NewFileKind? = nil
+    ) {
         self.action = action
         self.targets = targets
         self.dest = dest
         self.app = app
+        self.fileKind = fileKind
     }
 }
 

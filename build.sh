@@ -41,7 +41,8 @@ cp Resources/EasyRight.icns "$APP/Contents/Resources/EasyRight.icns"
 # 有名为 "EasyRight Dev" 的自签名证书就用它(签名身份稳定,重装后 TCC 权限不失效);
 # 没有则退回 ad-hoc(每次重装后需要在系统设置里重新授权屏幕录制/辅助功能)
 IDENTITY="-"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "EasyRight Dev"; then
+CODE_SIGNING_IDENTITIES=$(security find-identity -v -p codesigning 2>/dev/null || true)
+if grep -Fq '"EasyRight Dev"' <<< "$CODE_SIGNING_IDENTITIES"; then
     IDENTITY="EasyRight Dev"
 fi
 echo "==> 签名(identity: $IDENTITY)"

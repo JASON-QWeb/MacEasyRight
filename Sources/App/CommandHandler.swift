@@ -7,6 +7,7 @@ final class CommandHandler {
 
     func handle(_ cmd: Command) {
         switch cmd.action {
+        case "createFile": createFile(cmd.fileKind, in: cmd.dest)
         case "copyTo":     transfer(cmd.targets, to: cmd.dest, move: false)
         case "moveTo":     transfer(cmd.targets, to: cmd.dest, move: true)
         case "copyChoose": chooseAndTransfer(cmd.targets, move: false)
@@ -26,6 +27,20 @@ final class CommandHandler {
         case "closePins":     PinManager.shared.closeAll()
         case "settings":      (NSApp.delegate as? AppDelegate)?.openSettings()
         default: break
+        }
+    }
+
+    // MARK: - 新建文件
+
+    private func createFile(_ kind: NewFileKind?, in directoryPath: String?) {
+        guard let kind, let directoryPath else { return }
+        do {
+            let url = try NewFileCreator(fileManager: fm).create(kind, inDirectoryPath: directoryPath)
+            NSLog("EasyRight: created %@", url.path)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            NSLog("EasyRight: create file failed in %@: %@", directoryPath, error.localizedDescription)
+            showError("新建文件失败：\n\(error.localizedDescription)")
         }
     }
 

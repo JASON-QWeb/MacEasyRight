@@ -3,11 +3,60 @@ import FinderSync
 
 @objc(EasyRightFinderSync)
 class EasyRightFinderSync: FIFinderSync {
+    private struct NewFileRequest {
+        let kind: NewFileKind
+        let destination: String
+    }
+
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var newFileRequests: [Int: NewFileRequest] = [:]
+    private var nextNewFileRequestID = 1
 
     override init() {
         super.init()
-        // 监视整个磁盘,让所有目录的右键菜单都出现我们的菜单项
-        FIFinderSyncController.default().directoryURLs = [URL(fileURLWithPath: "/")]
+        updateMonitoredDirectories()
+
+        // 外接磁盘 / 网络卷可能在扩展启动后才挂载,届时刷新监视目录。
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
+            workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.updateMonitoredDirectories()
+            })
+        }
+    }
+
+    deinit {
+        let center = NSWorkspace.shared.notificationCenter
+        for observer in workspaceObservers { center.removeObserver(observer) }
+    }
+
+    private func updateMonitoredDirectories() {
+        // Finder Sync 不会跨符号链接推导后代,因此同时加入常用根路径及其真实路径。
+        let basePaths = [
+            "/",
+            realHomePath(),
+            "/Users",
+            "/Applications",
+            "/Volumes",
+            "/private",
+            "/tmp",
+            NSTemporaryDirectory(),
+        ]
+        var urls = Set(basePaths.flatMap { path -> [URL] in
+            let url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+            return [url, url.resolvingSymlinksInPath()]
+        })
+        let volumes = FileManager.default.mountedVolumeURLs(
+            includingResourceValuesForKeys: nil,
+            options: [.skipHiddenVolumes]
+        ) ?? []
+        for volume in volumes {
+            let url = URL(fileURLWithPath: volume.path, isDirectory: true).standardizedFileURL
+            urls.insert(url)
+            urls.insert(url.resolvingSymlinksInPath())
+        }
+        FIFinderSyncController.default().directoryURLs = urls
+        NSLog("EasyRightExt: monitoring %d roots", urls.count)
     }
 
     // MARK: - 菜单构建
@@ -15,6 +64,8 @@ class EasyRightFinderSync: FIFinderSync {
     override func menu(for menuKind: FIMenuKind) -> NSMenu {
         let menu = NSMenu(title: "")
         menu.autoenablesItems = false
+        newFileRequests.removeAll()
+        nextNewFileRequestID = 1
         let cfg = EasyConfig.load()
         switch menuKind {
         case .contextualMenuForItems:
@@ -29,6 +80,11 @@ class EasyRightFinderSync: FIFinderSync {
 
     /// 右键选中了文件/文件夹时的菜单
     private func buildItemsMenu(into menu: NSMenu, cfg: EasyConfig) {
+        let selection = FIFinderSyncController.default().selectedItemURLs() ?? []
+        if cfg.showNewFile, selection.count == 1, isFolder(selection[0]) {
+            addNewFileItems(into: menu, destination: selection[0].path)
+        }
+
         let copyItem = makeItem("复制文件到 ...", nil, symbol: "doc.on.doc")
         copyItem.submenu = folderSubmenu(
             action: #selector(copyToFolder(_:)),
@@ -48,8 +104,7 @@ class EasyRightFinderSync: FIFinderSync {
         if cfg.showCutPaste {
             menu.addItem(makeItem("剪切", #selector(cutItems(_:)), symbol: "scissors"))
             // 只选中了一个文件夹且有剪切内容时,提供"粘贴到此文件夹"
-            let selection = FIFinderSyncController.default().selectedItemURLs() ?? []
-            if selection.count == 1, selection[0].hasDirectoryPath, let state = CutState.load() {
+            if selection.count == 1, isFolder(selection[0]), let state = CutState.load() {
                 menu.addItem(makeItem(
                     "粘贴到此文件夹(\(state.paths.count) 项)",
                     #selector(pasteIntoSelectedFolder(_:)),
@@ -77,6 +132,9 @@ class EasyRightFinderSync: FIFinderSync {
 
     /// 右键窗口空白处(当前文件夹背景)时的菜单
     private func buildContainerMenu(into menu: NSMenu, cfg: EasyConfig) {
+        if cfg.showNewFile, let destination = containerPath() {
+            addNewFileItems(into: menu, destination: destination)
+        }
         if cfg.showCutPaste, let state = CutState.load() {
             menu.addItem(makeItem(
                 "粘贴到此处(\(state.paths.count) 项)",
@@ -116,6 +174,22 @@ class EasyRightFinderSync: FIFinderSync {
         return sub
     }
 
+    private func addNewFileItems(into menu: NSMenu, destination: String) {
+        let items: [(String, String, NewFileKind)] = [
+            ("新建 TXT 文件", "doc.plaintext", .txt),
+            ("新建 Markdown 文件", "doc.text", .md),
+            ("新建 JSON 文件", "curlybraces", .json),
+        ]
+        for (title, symbol, kind) in items {
+            let requestID = nextNewFileRequestID
+            nextNewFileRequestID += 1
+            newFileRequests[requestID] = NewFileRequest(kind: kind, destination: destination)
+            let item = makeItem(title, #selector(createFile(_:)), symbol: symbol)
+            item.tag = requestID
+            menu.addItem(item)
+        }
+    }
+
     private func makeItem(_ title: String, _ action: Selector?, symbol: String? = nil, represented: Any? = nil) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
@@ -136,9 +210,27 @@ class EasyRightFinderSync: FIFinderSync {
         FIFinderSyncController.default().targetedURL()?.path
     }
 
+    private func isFolder(_ url: URL) -> Bool {
+        if let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey]) {
+            return values.isDirectory == true && values.isPackage != true
+        }
+        return url.hasDirectoryPath
+    }
+
     private func send(_ cmd: Command) {
         guard let url = encodeCommandURL(cmd) else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    @objc func createFile(_ sender: NSMenuItem) {
+        guard let request = newFileRequests[sender.tag] else { return }
+        NSLog("EasyRightExt: createFile %@ in %@", request.kind.rawValue, request.destination)
+        send(Command(
+            action: "createFile",
+            targets: [],
+            dest: request.destination,
+            fileKind: request.kind
+        ))
     }
 
     @objc func copyToFolder(_ sender: NSMenuItem) {
