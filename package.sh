@@ -32,6 +32,9 @@ DIST_DIR="$PWD/dist"
 DMG_PATH="$DIST_DIR/EasyRight-$VERSION-$ARCH.dmg"
 RW_DMG_PATH="$DIST_DIR/.EasyRight-$VERSION-$ARCH.rw.dmg"
 VOLUME_NAME="EasyRight $VERSION"
+# 使用唯一的临时卷名设置 Finder 布局，避免用户已挂载同版本 DMG 时
+# AppleScript 误把 .DS_Store 写到旧卷。布局完成后再改回对外展示的正式卷名。
+PACKAGING_VOLUME_NAME="EasyRight Packaging $$"
 RENDER_DIR=$(mktemp -d "${TMPDIR:-/tmp}/easyright-background.XXXXXX")
 MOUNT_DIR=""
 MOUNT_DEVICE=""
@@ -72,7 +75,7 @@ if [ "$DMG_SIZE_MB" -lt 32 ]; then DMG_SIZE_MB=32; fi
 hdiutil create \
     -size "${DMG_SIZE_MB}m" \
     -fs HFS+ \
-    -volname "$VOLUME_NAME" \
+    -volname "$PACKAGING_VOLUME_NAME" \
     -ov \
     "$RW_DMG_PATH" >/dev/null
 
@@ -92,7 +95,7 @@ ditto "$BACKGROUND_PNG" "$MOUNT_DIR/.background/background.png"
 echo "==> 设置拖拽安装窗口布局"
 osascript <<APPLESCRIPT
 tell application "Finder"
-    tell disk "$VOLUME_NAME"
+    tell disk "$PACKAGING_VOLUME_NAME"
         open
         set current view of container window to icon view
         set toolbar visible of container window to false
@@ -112,6 +115,12 @@ end tell
 delay 2
 APPLESCRIPT
 
+sync
+if [ ! -f "$MOUNT_DIR/.DS_Store" ]; then
+    echo "错误:Finder 未写入 DMG 窗口布局(.DS_Store)。"
+    exit 1
+fi
+diskutil rename "$MOUNT_DEVICE" "$VOLUME_NAME" >/dev/null
 sync
 detach_image "$MOUNT_DEVICE"
 MOUNT_DEVICE=""
