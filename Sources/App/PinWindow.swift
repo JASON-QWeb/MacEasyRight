@@ -29,9 +29,19 @@ final class PinManager {
                           width: size.width, height: size.height)
         }
         let win = PinWindow(image: image, frame: rect)
-        windows.append(win)
+        register(win)
         win.orderFrontRegardless()
-        NSLog("EasyRight: PinWindow created %.0fx%.0f (total %d)", rect.width, rect.height, windows.count)
+    }
+
+    func register(_ win: PinWindow) {
+        guard !windows.contains(where: { $0 === win }) else { return }
+        windows.append(win)
+        NSLog(
+            "EasyRight: PinWindow created %.0fx%.0f (total %d)",
+            win.frame.width,
+            win.frame.height,
+            windows.count
+        )
     }
 
     func remove(_ win: PinWindow) {
@@ -44,6 +54,11 @@ final class PinManager {
         for w in list { w.tearDown() }
         NSLog("EasyRight: all pins closed")
     }
+}
+
+enum PinWindowPurpose {
+    case pinned
+    case capturePreview
 }
 
 // MARK: - 标注模型
@@ -115,12 +130,22 @@ final class PinWindow: NSWindow {
     private var canvas: PinCanvasView { contentView as! PinCanvasView }
     private var pinToolbar: PinToolbarPanel?
     private var hideTimer: Timer?
+    private var purpose: PinWindowPurpose
+    private var onPreviewFinished: (() -> Void)?
+    private var selectedColorIndex = 0
 
-    init(image: NSImage, frame: NSRect) {
+    init(
+        image: NSImage,
+        frame: NSRect,
+        purpose: PinWindowPurpose = .pinned,
+        onPreviewFinished: (() -> Void)? = nil
+    ) {
         self.image = image
         self.aspect = image.size.width > 0 && image.size.height > 0
             ? image.size.width / image.size.height
             : 1
+        self.purpose = purpose
+        self.onPreviewFinished = onPreviewFinished
         super.init(contentRect: frame, styleMask: [.borderless, .resizable], backing: .buffered, defer: false)
         level = .floating
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -143,16 +168,27 @@ final class PinWindow: NSWindow {
         view.layer?.borderColor = NSColor.white.withAlphaComponent(0.35).cgColor
         contentView = view
 
-        let tb = PinToolbarPanel(pin: self)
-        pinToolbar = tb
-        addChildWindow(tb, ordered: .above)
+        installToolbar()
         showToolbar()
-        scheduleToolbarHide(after: 5)
+        if purpose == .pinned { scheduleToolbarHide(after: 5) }
     }
 
     override var canBecomeKey: Bool { true }
+    var isCapturePreview: Bool { purpose == .capturePreview }
 
     // MARK: 工具栏显隐
+
+    private func installToolbar() {
+        if let oldToolbar = pinToolbar {
+            removeChildWindow(oldToolbar)
+            oldToolbar.orderOut(nil)
+        }
+        let toolbar = PinToolbarPanel(pin: self, isCapturePreview: isCapturePreview)
+        pinToolbar = toolbar
+        addChildWindow(toolbar, ordered: .above)
+        toolbar.highlightTool(canvas.tool)
+        toolbar.highlightColor(selectedColorIndex)
+    }
 
     func showToolbar() {
         hideTimer?.invalidate()
@@ -162,6 +198,7 @@ final class PinWindow: NSWindow {
     }
 
     func scheduleToolbarHide(after seconds: TimeInterval = 0.8) {
+        guard purpose == .pinned else { return }
         hideTimer?.invalidate()
         hideTimer = Timer.scheduledTimer(
             timeInterval: seconds,
@@ -247,6 +284,7 @@ final class PinWindow: NSWindow {
     @objc func pickColor(_ sender: NSButton) {
         let colors = PinToolbarPanel.colors
         guard sender.tag < colors.count else { return }
+        selectedColorIndex = sender.tag
         canvas.color = colors[sender.tag]
         pinToolbar?.highlightColor(sender.tag)
         // 选颜色时如果还在移动工具,自动切成画笔
@@ -282,7 +320,8 @@ final class PinWindow: NSWindow {
         panel.allowedContentTypes = [.png]
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        panel.nameFieldStringValue = "贴图 \(df.string(from: Date())).png"
+        let prefix = isCapturePreview ? "截图" : "贴图"
+        panel.nameFieldStringValue = "\(prefix) \(df.string(from: Date())).png"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let out = canvas.compositedImage()
         do {
@@ -298,15 +337,30 @@ final class PinWindow: NSWindow {
             try png.write(to: url, options: .atomic)
         } catch {
             let alert = NSAlert()
-            alert.messageText = "保存贴图失败"
+            alert.messageText = isCapturePreview ? "保存截图失败" : "保存贴图失败"
             alert.informativeText = error.localizedDescription
             alert.alertStyle = .warning
             alert.runModal()
         }
     }
 
+    @objc func pinCapture() {
+        guard purpose == .capturePreview else { return }
+        canvas.commitTextEditor()
+        purpose = .pinned
+        PinManager.shared.register(self)
+        finishPreview()
+        installToolbar()
+        showToolbar()
+        scheduleToolbarHide(after: 5)
+    }
+
     @objc func closePin() {
-        PinManager.shared.remove(self)
+        if purpose == .pinned {
+            PinManager.shared.remove(self)
+        } else {
+            finishPreview()
+        }
         tearDown()
     }
 
@@ -322,6 +376,12 @@ final class PinWindow: NSWindow {
         }
         pinToolbar = nil
         orderOut(nil)
+    }
+
+    private func finishPreview() {
+        let completion = onPreviewFinished
+        onPreviewFinished = nil
+        completion?()
     }
 }
 
@@ -558,8 +618,13 @@ final class PinCanvasView: NSView, NSTextFieldDelegate {
         menu.addItem(withTitle: "另存为…", action: #selector(PinWindow.saveImage), keyEquivalent: "s").target = win
         menu.addItem(withTitle: "实际大小(双击)", action: #selector(PinWindow.actualSize), keyEquivalent: "").target = win
         menu.addItem(.separator())
-        menu.addItem(withTitle: "关闭贴图(⌫)", action: #selector(PinWindow.closePin), keyEquivalent: "w").target = win
-        menu.addItem(withTitle: "关闭所有贴图", action: #selector(PinWindow.closeAllPins), keyEquivalent: "").target = win
+        if win.isCapturePreview {
+            menu.addItem(withTitle: "贴图", action: #selector(PinWindow.pinCapture), keyEquivalent: "").target = win
+            menu.addItem(withTitle: "完成", action: #selector(PinWindow.closePin), keyEquivalent: "w").target = win
+        } else {
+            menu.addItem(withTitle: "关闭贴图(⌫)", action: #selector(PinWindow.closePin), keyEquivalent: "w").target = win
+            menu.addItem(withTitle: "关闭所有贴图", action: #selector(PinWindow.closeAllPins), keyEquivalent: "").target = win
+        }
         return menu
     }
 }
@@ -573,7 +638,7 @@ final class PinToolbarPanel: NSPanel {
     private var toolButtons: [NSButton] = []
     private var colorButtons: [NSButton] = []
 
-    init(pin: PinWindow) {
+    init(pin: PinWindow, isCapturePreview: Bool) {
         super.init(contentRect: NSRect(x: 0, y: 0, width: 100, height: 36),
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         level = pin.level
@@ -590,8 +655,9 @@ final class PinToolbarPanel: NSPanel {
 
         var views: [NSView] = []
 
+        let moveTip = isCapturePreview ? "移动 / 拖动截图预览" : "移动 / 拖动贴图"
         let tools: [(PinTool, String, String)] = [
-            (.move, "cursorarrow", "移动 / 拖动贴图"),
+            (.move, "cursorarrow", moveTip),
             (.pen, "scribble", "画笔"),
             (.line, "line.diagonal", "直线"),
             (.arrow, "arrow.up.right", "箭头"),
@@ -624,7 +690,13 @@ final class PinToolbarPanel: NSPanel {
         views.append(makeButton(symbol: "arrow.uturn.backward", tip: "撤销标注 (⌘Z)", target: pin, action: #selector(PinWindow.undoAnnotation)))
         views.append(makeButton(symbol: "doc.on.doc", tip: "复制到剪贴板 (⌘C)", target: pin, action: #selector(PinWindow.copyImage)))
         views.append(makeButton(symbol: "square.and.arrow.down", tip: "另存为… (⌘S)", target: pin, action: #selector(PinWindow.saveImage)))
-        views.append(makeButton(symbol: "xmark", tip: "关闭贴图 (⌫)", target: pin, action: #selector(PinWindow.closePin)))
+        if isCapturePreview {
+            views.append(separator())
+            views.append(makeButton(symbol: "pin.fill", tip: "贴图", target: pin, action: #selector(PinWindow.pinCapture)))
+            views.append(makeButton(symbol: "checkmark", tip: "完成", target: pin, action: #selector(PinWindow.closePin)))
+        } else {
+            views.append(makeButton(symbol: "xmark", tip: "关闭贴图 (⌫)", target: pin, action: #selector(PinWindow.closePin)))
+        }
 
         let stack = NSStackView(views: views)
         stack.orientation = .horizontal
